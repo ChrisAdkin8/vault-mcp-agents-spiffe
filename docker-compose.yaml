@@ -1,0 +1,130 @@
+# Full stack: Vault Enterprise + MCP Servers + Agent CLI.
+#
+# Prerequisites:
+#   1. Copy docker/.env.example to docker/.env and fill in values.
+#   2. Ensure VAULT_LICENSE is set (either in docker/.env or as an env var).
+#
+# Usage:
+#   docker compose --env-file docker/.env up -d --build
+#   docker compose --env-file docker/.env exec agent-cli vault-mcp-agents
+#   docker compose --env-file docker/.env down
+#
+# For local dev (Vault OSS only, no containers for MCP/agents):
+#   docker compose -f docker-compose.dev.yaml up -d
+
+services:
+  # ---------- Vault Enterprise ----------
+  vault:
+    image: hashicorp/vault-enterprise:1.21-ent
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "dev-root-token"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_LICENSE: "${VAULT_LICENSE}"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - vault-data:/vault/data
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - mcp-net
+
+  # ---------- One-shot Vault configuration ----------
+  vault-init:
+    image: hashicorp/vault-enterprise:1.21-ent
+    depends_on:
+      vault:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: "http://vault:8200"
+      VAULT_TOKEN: "dev-root-token"
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sh /scripts/setup_vault.sh
+        sh /scripts/setup_vault_enterprise.sh
+    networks:
+      - mcp-net
+
+  # ---------- Data MCP Server (GCS + BigQuery) ----------
+  data-mcp-server:
+    build:
+      context: .
+      dockerfile: docker/mcp-server.Dockerfile
+      args:
+        MCP_SERVER_MODULE: vault_mcp_agents.mcp.data_server
+    environment:
+      MCP_TRANSPORT: "http"
+      MCP_PORT: "8001"
+      MCP_HOST: "0.0.0.0"
+      VAULT_ADDR: "http://vault:8200"
+    ports:
+      - "8001:8001"
+    depends_on:
+      vault-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - mcp-net
+
+  # ---------- Compute MCP Server (GCE) ----------
+  compute-mcp-server:
+    build:
+      context: .
+      dockerfile: docker/mcp-server.Dockerfile
+      args:
+        MCP_SERVER_MODULE: vault_mcp_agents.mcp.compute_server
+    environment:
+      MCP_TRANSPORT: "http"
+      MCP_PORT: "8002"
+      MCP_HOST: "0.0.0.0"
+      VAULT_ADDR: "http://vault:8200"
+    ports:
+      - "8002:8002"
+    depends_on:
+      vault-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - mcp-net
+
+  # ---------- Agent CLI ----------
+  agent-cli:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    environment:
+      VAULT_ADDR: "http://vault:8200"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    depends_on:
+      data-mcp-server:
+        condition: service_healthy
+      compute-mcp-server:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+    networks:
+      - mcp-net
+
+volumes:
+  vault-data:
+
+networks:
+  mcp-net:
+    driver: bridge

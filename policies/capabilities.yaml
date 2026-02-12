@@ -1,0 +1,75 @@
+# Policy definitions for identity-gated MCP capabilities.
+#
+# Structure: Each entry maps a human role to the tools available when that
+# role interacts through a specific agent.  The Vault group/policy attached
+# to the human's token determines their role.
+#
+# Capability names correspond to MCP tool names exposed by each server.
+
+# SPIFFE trust domain for workload identity (used in containerised deployment).
+trust_domain: "vault-mcp-demo"
+
+# Maps SPIFFE IDs to agent IDs for policy resolution.
+spiffe_identity_map:
+  "spiffe://vault-mcp-demo/agent/data_agent": "data_agent"
+  "spiffe://vault-mcp-demo/agent/compute_agent": "compute_agent"
+
+roles:
+  # --- Operators: broad read/write across both agents -----------------------
+  operator:
+    vault_policy: "operator-policy"
+    agents:
+      data_agent:
+        allowed_tools:
+          - "list_buckets"
+          - "read_object"
+          - "write_object"
+          - "delete_object"
+          - "query_bigquery"
+          - "list_datasets"
+          - "create_dataset"
+        max_gcp_token_ttl: "5m"
+
+      compute_agent:
+        allowed_tools:
+          - "list_instances"
+          - "get_instance"
+          - "start_instance"
+          - "stop_instance"
+          - "create_instance"
+          - "delete_instance"
+        max_gcp_token_ttl: "5m"
+
+  # --- Analysts: read-only data access, no compute mutations ----------------
+  analyst:
+    vault_policy: "analyst-policy"
+    agents:
+      data_agent:
+        allowed_tools:
+          - "list_buckets"
+          - "read_object"
+          - "query_bigquery"
+          - "list_datasets"
+        max_gcp_token_ttl: "5m"
+
+      compute_agent:
+        allowed_tools:
+          - "list_instances"
+          - "get_instance"
+        max_gcp_token_ttl: "5m"
+
+  # --- Viewers: minimal read-only access ------------------------------------
+  viewer:
+    vault_policy: "viewer-policy"
+    agents:
+      data_agent:
+        allowed_tools:
+          - "list_buckets"
+          - "read_object"
+          - "list_datasets"
+        max_gcp_token_ttl: "5m"
+
+      compute_agent:
+        allowed_tools:
+          - "list_instances"
+        max_gcp_token_ttl: "5m"

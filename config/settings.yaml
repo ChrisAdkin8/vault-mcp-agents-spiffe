@@ -1,0 +1,70 @@
+# Vault connection settings
+vault:
+  address: "http://127.0.0.1:8200"
+  # For production, use TLS:
+  # address: "https://vault.example.com:8200"
+  namespace: ""  # Vault Enterprise namespace, leave empty for OSS
+
+  # Human authentication method configured in Vault
+  auth_method: "userpass"  # Options: userpass, ldap, oidc
+
+  # GCP secrets engine mount path
+  gcp_secrets_mount: "gcp"
+
+  # Agent authentication uses AppRole
+  agent_approle_mount: "approle"
+
+# Agent definitions — each agent has a Vault AppRole identity and an MCP server target
+agents:
+  data_agent:
+    description: "Handles GCS and BigQuery operations"
+    mcp_server: "data_server"
+    vault_role: "data-agent-role"
+    # GCP impersonated account in Vault's GCP secrets engine
+    gcp_impersonated_account: "data-agent-gcp"
+
+  compute_agent:
+    description: "Handles GCE instance and infrastructure operations"
+    mcp_server: "compute_server"
+    vault_role: "compute-agent-role"
+    gcp_impersonated_account: "compute-agent-gcp"
+
+# MCP server endpoints
+# Set transport to "http" and use url for containerised deployment;
+# set transport to "stdio" and use command/args for local development.
+mcp_servers:
+  data_server:
+    transport: "stdio"
+    command: "python"
+    args: ["-m", "vault_mcp_agents.mcp.data_server"]
+    url: "http://data-mcp-server:8001/mcp"  # used when transport: "http"
+
+  compute_server:
+    transport: "stdio"
+    command: "python"
+    args: ["-m", "vault_mcp_agents.mcp.compute_server"]
+    url: "http://compute-mcp-server:8002/mcp"  # used when transport: "http"
+
+# LLM configuration for LangChain agents
+llm:
+  provider: "anthropic"  # Options: anthropic, openai
+  model: "claude-sonnet-4-20250514"
+  temperature: 0.0
+
+# GCP project default
+gcp:
+  project_id: "<Your GCP project id goes here>"
+  region: "us-central1"
+
+# SPIFFE workload identity (containerised deployment only)
+spiffe:
+  enabled: false         # Set to true in Docker Compose / container mode
+  trust_domain: "vault-mcp-demo"
+  auth_mount: "spiffe"
+  workload_api_endpoint: "unix:///run/spire/sockets/agent.sock"
+
+# Audit logging
+audit:
+  enabled: true
+  log_file: ""        # Set a path (e.g. "audit.log") to write JSON events to file
+  log_to_stdout: true # Emit audit events to stdout

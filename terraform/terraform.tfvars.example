@@ -1,0 +1,9 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored and should never be committed.
+
+gcp_project_id = "my-gcp-project"
+gcp_region     = "us-central1"
+
+# Vault dev server defaults (override for non-dev environments)
+# vault_address = "http://127.0.0.1:8200"
+# vault_token   = "dev-root-token"

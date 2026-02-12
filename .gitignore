@@ -1,0 +1,30 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+.env
+*.pem
+*.json
+!policies/*.yaml
+!config/*.yaml
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Docker secrets
+docker/.env
+*.hclic
+audit.log
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!terraform/terraform.tfvars.example

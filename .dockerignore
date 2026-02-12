@@ -1,0 +1,13 @@
+.venv/
+.git/
+.terraform/
+*.tfstate*
+__pycache__/
+*.pyc
+.env
+docker/.env
+*.hclic
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+audit.log

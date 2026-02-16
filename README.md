@@ -34,6 +34,12 @@ The 5-minute ceiling is enforced at two independent layers, so both must agree b
 | **Vault GCP impersonated account** | `ttl = "300"` on each `vault_gcp_secret_impersonated_account` in Terraform | Server-side ceiling — Vault passes this as the `lifetime` to GCP's `generateAccessToken` API, so the token genuinely expires after 5 minutes |
 | **Application policy** | `max_gcp_token_ttl: "5m"` in `policies/capabilities.yaml` | Client-side guard — the application policy declares the intended maximum TTL for audit and defence-in-depth |
 
+## Why SPIFFE Verifiable Identity Documents for MCP Server Identity ?
+
+<p align="center">
+  <img src="docs/why-spiffe-timeline.png" alt="MCP server identity threat timeline: implicit identity vs strong cryptographically verifiable identity" width="780">
+</p>
+
 ## What this project demonstrates
 
 | Concern | How it's handled |

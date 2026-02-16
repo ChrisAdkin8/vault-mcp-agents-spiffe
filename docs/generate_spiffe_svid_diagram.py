@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Generate the SPIFFE SVID Acquisition Flow diagram."""
+"""Generate the SPIFFE SVID Acquisition Flow diagram.
+
+Updated to reflect the actual architecture: Vault Agent sidecar with
+AppRole auth renders SVIDs from Vault's PKI engine to a shared Docker
+volume.  No SPIRE infrastructure is used.
+"""
 
 from PIL import Image, ImageDraw, ImageFont
 import math
@@ -23,7 +28,10 @@ WHITE = (240, 240, 240)
 GREY = (160, 160, 160)
 DARK_GREEN_BG = (40, 60, 40)
 DARK_YELLOW_BG = (60, 55, 30)
+DARK_BLUE_BG = (35, 45, 70)
 DASHED_BORDER = (120, 120, 60)
+PURPLE = (160, 120, 210)
+DARK_PURPLE_BG = (50, 40, 65)
 
 # Fonts (scaled)
 try:
@@ -58,26 +66,21 @@ def draw_dashed_rect(xy, outline, dash_len=6, gap_len=4, width=1):
     gl = gap_len * S
     w = width * S
     x0, y0, x1, y1 = xy
-    # Top edge
-    x = x0
-    while x < x1:
-        draw.line([(x, y0), (min(x + dl, x1), y0)], fill=outline, width=w)
-        x += dl + gl
-    # Bottom edge
-    x = x0
-    while x < x1:
-        draw.line([(x, y1), (min(x + dl, x1), y1)], fill=outline, width=w)
-        x += dl + gl
-    # Left edge
-    y = y0
-    while y < y1:
-        draw.line([(x0, y), (x0, min(y + dl, y1))], fill=outline, width=w)
-        y += dl + gl
-    # Right edge
-    y = y0
-    while y < y1:
-        draw.line([(x1, y), (x1, min(y + dl, y1))], fill=outline, width=w)
-        y += dl + gl
+    for edge_start, edge_end, is_horiz in [
+        ((x0, y0), (x1, y0), True), ((x0, y1), (x1, y1), True),
+        ((x0, y0), (x0, y1), False), ((x1, y0), (x1, y1), False),
+    ]:
+        pos = 0
+        length = abs((edge_end[0] - edge_start[0]) + (edge_end[1] - edge_start[1]))
+        while pos < length:
+            if is_horiz:
+                sx, sy = edge_start[0] + pos, edge_start[1]
+                ex, ey = min(edge_start[0] + pos + dl, edge_end[0]), edge_start[1]
+            else:
+                sx, sy = edge_start[0], edge_start[1] + pos
+                ex, ey = edge_start[0], min(edge_start[1] + pos + dl, edge_end[1])
+            draw.line([(sx, sy), (ex, ey)], fill=outline, width=w)
+            pos += dl + gl
 
 
 def text_centered(x, y, text, font, fill):
@@ -98,129 +101,146 @@ def draw_arrow(x0, y0, x1, y1, color=GREY, width=2, head_size=8):
     draw.polygon([(x1, y1), (lx, ly), (rx, ry)], fill=color)
 
 
-# Helper: scale coordinates
-def s(*vals):
-    return tuple(v * S for v in vals)
-
-
 # ─── Title ───
 text_centered(W // 2, 20 * S, "SPIFFE SVID Acquisition Flow", font_title, WHITE)
-text_centered(W // 2, 50 * S, "vault-mcp-agents-spiffe  -  How MCP Server workloads obtain X.509 SVIDs", font_subtitle, GREY)
+text_centered(W // 2, 50 * S, "vault-mcp-agents-spiffe  —  How MCP Server workloads obtain X.509 SVIDs", font_subtitle, GREY)
 
-# ─── MCP Server box (top left) ───
-mcp_x, mcp_y = 80 * S, 100 * S
-draw_rounded_rect((mcp_x, mcp_y, mcp_x + 180 * S, mcp_y + 55 * S), fill=DARK_GREEN_BG, outline=CYAN)
-text_centered(mcp_x + 90 * S, mcp_y + 8 * S, "MCP Server", font_heading, CYAN)
-text_centered(mcp_x + 90 * S, mcp_y + 30 * S, "data / compute workload", font_small, GREY)
+# ═══════════════════════════════════════════════════════════════════════════
+# Row 1: Terraform Bootstrap
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ─── SPIRE Agent box (top right) ───
-sa_x, sa_y = 880 * S, 100 * S
-draw_rounded_rect((sa_x, sa_y, sa_x + 180 * S, sa_y + 55 * S), fill=DARK_GREEN_BG, outline=CYAN)
-text_centered(sa_x + 90 * S, sa_y + 8 * S, "SPIRE Agent", font_heading, CYAN)
-text_centered(sa_x + 90 * S, sa_y + 30 * S, "Node-level daemon", font_small, GREY)
+# ─── Terraform box (top left) ───
+tf_x, tf_y = 80 * S, 100 * S
+draw_rounded_rect((tf_x, tf_y, tf_x + 260 * S, tf_y + 60 * S), fill=DARK_PURPLE_BG, outline=PURPLE)
+text_centered(tf_x + 130 * S, tf_y + 8 * S, "terraform-setup", font_heading, PURPLE)
+text_centered(tf_x + 130 * S, tf_y + 30 * S, "Bootstrap container", font_small, GREY)
 
-# ─── Arrow: MCP Server -> SPIRE Agent (step 1) ───
-draw_arrow(mcp_x + 180 * S, mcp_y + 27 * S, sa_x, sa_y + 27 * S, color=GREY)
-# Step 1 circle - positioned above the arrow line
-text_centered(W // 2, 88 * S, "Connect via Workload API", font_small, GREEN)
-draw_circle_number(W // 2 - 110 * S, 96 * S, 1)
-text_centered(W // 2, 100 * S, "unix:///run/spire/agent/agent.sock", font_small, GREY)
+# ─── Vault box (top right) ───
+v_x, v_y = 680 * S, 100 * S
+draw_rounded_rect((v_x, v_y, v_x + 350 * S, v_y + 60 * S), fill=DARK_YELLOW_BG, outline=YELLOW)
+text_centered(v_x + 175 * S, v_y + 8 * S, "Vault Enterprise", font_heading, YELLOW)
+text_centered(v_x + 175 * S, v_y + 30 * S, "PKI engine + AppRole auth", font_small, GREY)
 
-# ─── Workload Attestation box (dashed, right side) ───
-wa_x, wa_y = 870 * S, 175 * S
-draw_dashed_rect((wa_x, wa_y, wa_x + 230 * S, wa_y + 70 * S), outline=DASHED_BORDER)
-draw.text((wa_x + 10 * S, wa_y + 5 * S), "Workload Attestation", fill=YELLOW, font=font_heading)
-draw.text((wa_x + 10 * S, wa_y + 24 * S), "SPIRE Agent verifies caller:", fill=GREY, font=font_small)
-draw.text((wa_x + 10 * S, wa_y + 37 * S), "Docker labels / k8s selectors", fill=GREY, font=font_small)
-draw.text((wa_x + 10 * S, wa_y + 50 * S), "Process UID/GID, binary hash", fill=GREY, font=font_small)
+# Step 1: Terraform -> Vault (configure PKI + AppRole)
+draw_arrow(tf_x + 260 * S, tf_y + 30 * S, v_x, v_y + 30 * S, color=PURPLE)
+draw_circle_number(tf_x + 290 * S, tf_y + 8 * S, 1)
+draw.text((tf_x + 308 * S, tf_y + 1 * S), "Configure PKI engine,", font=font_small, fill=GREEN)
+draw.text((tf_x + 308 * S, tf_y + 14 * S), "AppRole, and mcp-policy", font=font_small, fill=GREEN)
 
-# Step 2 circle - left of the attestation box
-draw_circle_number(wa_x - 20 * S, wa_y + 15 * S, 2)
-draw.text((wa_x - 115 * S, wa_y + 6 * S), "Attest workload", font=font_small, fill=GREEN)
+# ─── shared-creds volume (below Terraform) ───
+sc_x, sc_y = 100 * S, 210 * S
+draw_dashed_rect((sc_x, sc_y, sc_x + 220 * S, sc_y + 55 * S), outline=DASHED_BORDER)
+draw.text((sc_x + 10 * S, sc_y + 5 * S), "shared-creds volume", fill=YELLOW, font=font_heading)
+draw.text((sc_x + 10 * S, sc_y + 26 * S), "role_id  +  secret_id", fill=GREY, font=font_small)
 
-# Step 3 - Request SVID (below attestation box)
-draw_circle_number(wa_x + 115 * S, wa_y + 85 * S, 3, color=ORANGE)
-draw.text((wa_x + 132 * S, wa_y + 78 * S), "Request SVID", font=font_small, fill=GREEN)
+# Step 2: Terraform -> shared-creds (write AppRole creds)
+draw_arrow(tf_x + 130 * S, tf_y + 60 * S, sc_x + 110 * S, sc_y, color=PURPLE)
+draw_circle_number(tf_x + 60 * S, tf_y + 72 * S, 2)
+draw.text((tf_x + 78 * S, tf_y + 65 * S), "Write AppRole creds", font=font_small, fill=GREEN)
 
-# ─── SPIRE Server box (centre) ───
-ss_x, ss_y = 460 * S, 310 * S
-draw_rounded_rect((ss_x, ss_y, ss_x + 220 * S, ss_y + 60 * S), fill=DARK_YELLOW_BG, outline=YELLOW)
-text_centered(ss_x + 110 * S, ss_y + 8 * S, "SPIRE Server", font_heading, YELLOW)
-text_centered(ss_x + 110 * S, ss_y + 28 * S, "Central trust authority", font_small, GREY)
-text_centered(ss_x + 110 * S, ss_y + 42 * S, "Signs X.509 certs to matching", font_small, GREY)
+# ═══════════════════════════════════════════════════════════════════════════
+# Row 2: Vault Agent
+# ═══════════════════════════════════════════════════════════════════════════
 
-# Arrow: SPIRE Agent -> SPIRE Server
-draw_arrow(sa_x + 40 * S, sa_y + 55 * S, ss_x + 160 * S, ss_y, color=GREY)
+# ─── Vault Agent box ───
+va_x, va_y = 380 * S, 330 * S
+draw_rounded_rect((va_x, va_y, va_x + 300 * S, va_y + 70 * S), fill=DARK_YELLOW_BG, outline=ORANGE)
+text_centered(va_x + 150 * S, va_y + 8 * S, "Vault Agent", font_heading, ORANGE)
+text_centered(va_x + 150 * S, va_y + 28 * S, "Sidecar container", font_small, GREY)
+text_centered(va_x + 150 * S, va_y + 42 * S, "config/agent.hcl", font_small, GREY)
 
-# ─── Registration Entry box (dashed, right) ───
-re_x, re_y = 820 * S, 310 * S
-draw_dashed_rect((re_x, re_y, re_x + 230 * S, re_y + 65 * S), outline=DASHED_BORDER)
-draw.text((re_x + 10 * S, re_y + 5 * S), "Registration Entry", fill=YELLOW, font=font_heading)
-draw.text((re_x + 10 * S, re_y + 24 * S), "SPIFFE ID:", fill=GREY, font=font_small)
-draw.text((re_x + 10 * S, re_y + 37 * S), "spiffe://vault-mcp-demo/", fill=CYAN, font=font_small)
-draw.text((re_x + 10 * S, re_y + 50 * S), "agent/data_agent", fill=CYAN, font=font_small)
+# Step 3: shared-creds -> Vault Agent (read AppRole creds)
+draw_arrow(sc_x + 200 * S, sc_y + 40 * S, va_x, va_y + 20 * S, color=ORANGE)
+draw_circle_number(sc_x + 180 * S, sc_y + 70 * S, 3)
+draw.text((sc_x + 198 * S, sc_y + 63 * S), "Read role_id + secret_id", font=font_small, fill=GREEN)
 
-# Step 4 - Validate registration entry
-draw_arrow(ss_x + 220 * S, ss_y + 30 * S, re_x, re_y + 30 * S, color=GREY)
-draw_circle_number(ss_x + 235 * S, ss_y - 5 * S, 4)
-draw.text((ss_x + 250 * S, ss_y - 12 * S), "Validate registration", font=font_small, fill=GREEN)
-draw.text((ss_x + 250 * S, ss_y + 1 * S), "entry", font=font_small, fill=GREEN)
+# Step 4: Vault Agent -> Vault (authenticate via AppRole)
+draw_arrow(va_x + 250 * S, va_y + 15 * S, v_x + 100 * S, v_y + 60 * S, color=ORANGE)
+draw_circle_number(va_x + 310 * S, va_y - 20 * S, 4)
+draw.text((va_x + 328 * S, va_y - 28 * S), "Authenticate via AppRole", font=font_small, fill=GREEN)
+draw.text((va_x + 328 * S, va_y - 14 * S), "Receive Vault token", font=font_small, fill=GREY)
 
-# ─── X.509 SVID box (left) ───
-svid_x, svid_y = 60 * S, 400 * S
-draw_rounded_rect((svid_x, svid_y, svid_x + 250 * S, svid_y + 75 * S), fill=DARK_GREEN_BG, outline=CYAN)
+# ─── PKI Issue callout (right of Vault Agent) ───
+pki_x, pki_y = 800 * S, 290 * S
+draw_dashed_rect((pki_x, pki_y, pki_x + 280 * S, pki_y + 80 * S), outline=DASHED_BORDER)
+draw.text((pki_x + 10 * S, pki_y + 5 * S), "PKI Issue Request:", fill=YELLOW, font=font_heading)
+draw.text((pki_x + 10 * S, pki_y + 26 * S), "POST pki/issue/mcp-server", fill=CYAN, font=font_small)
+draw.text((pki_x + 10 * S, pki_y + 40 * S), "common_name = mcp-server", fill=GREY, font=font_small)
+draw.text((pki_x + 10 * S, pki_y + 54 * S), "uri_sans = spiffe://my-trust-", fill=GREY, font=font_small)
+draw.text((pki_x + 10 * S, pki_y + 67 * S), "  domain/ns/default/sa/mcp", fill=GREY, font=font_small)
+
+# Step 5: Vault Agent requests cert from PKI engine
+draw_arrow(va_x + 300 * S, va_y + 50 * S, pki_x, pki_y + 40 * S, color=ORANGE)
+draw_circle_number(va_x + 310 * S, va_y + 55 * S, 5)
+draw.text((va_x + 328 * S, va_y + 48 * S), "Request X.509 SVID", font=font_small, fill=GREEN)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Row 3: certs-vol and X.509 SVID
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─── X.509 SVID box ───
+svid_x, svid_y = 80 * S, 480 * S
+draw_rounded_rect((svid_x, svid_y, svid_x + 280 * S, svid_y + 85 * S), fill=DARK_GREEN_BG, outline=CYAN)
 draw.text((svid_x + 10 * S, svid_y + 8 * S), "X.509 SVID", fill=CYAN, font=font_heading)
-draw.text((svid_x + 10 * S, svid_y + 27 * S), "SAN: spiffe://vault-mcp-demo/", fill=GREY, font=font_small)
-draw.text((svid_x + 10 * S, svid_y + 40 * S), "       agent/data_agent", fill=GREY, font=font_small)
-draw.text((svid_x + 10 * S, svid_y + 55 * S), "Private key  +  Trust bundle", fill=GREY, font=font_small)
+draw.text((svid_x + 10 * S, svid_y + 28 * S), "SAN: spiffe://my-trust-domain/", fill=GREY, font=font_small)
+draw.text((svid_x + 10 * S, svid_y + 42 * S), "       ns/default/sa/mcp", fill=GREY, font=font_small)
+draw.text((svid_x + 10 * S, svid_y + 58 * S), "TTL: 1 hour (auto-rotated)", fill=GREY, font=font_small)
 
-# Step 5 - SVID issued (arrow from SPIRE Server to X.509 SVID)
-draw_arrow(ss_x + 30 * S, ss_y + 60 * S, svid_x + 200 * S, svid_y, color=GREY)
-draw_circle_number(ss_x - 100 * S, ss_y + 55 * S, 5)
-draw.text((ss_x - 85 * S, ss_y + 48 * S), "SVID issued", font=font_small, fill=GREEN)
+# ─── certs-vol volume (centre) ───
+cv_x, cv_y = 450 * S, 490 * S
+draw_dashed_rect((cv_x, cv_y, cv_x + 260 * S, cv_y + 70 * S), outline=DASHED_BORDER)
+draw.text((cv_x + 10 * S, cv_y + 5 * S), "certs-vol (shared volume)", fill=YELLOW, font=font_heading)
+draw.text((cv_x + 10 * S, cv_y + 26 * S), "/etc/mcp/certs/server.crt", fill=CYAN, font=font_small)
+draw.text((cv_x + 10 * S, cv_y + 39 * S), "/etc/mcp/certs/server.key", fill=CYAN, font=font_small)
+draw.text((cv_x + 10 * S, cv_y + 52 * S), "/etc/mcp/certs/ca.crt", fill=CYAN, font=font_small)
 
-# ─── Vault Enterprise box (centre bottom) ───
-ve_x, ve_y = 400 * S, 560 * S
-draw_rounded_rect((ve_x, ve_y, ve_x + 260 * S, ve_y + 65 * S), fill=DARK_YELLOW_BG, outline=YELLOW)
-text_centered(ve_x + 130 * S, ve_y + 8 * S, "Vault Enterprise", font_heading, YELLOW)
-text_centered(ve_x + 130 * S, ve_y + 28 * S, "SPIFFE auth method", font_small, GREY)
-text_centered(ve_x + 130 * S, ve_y + 42 * S, "Cert chain validation + role matching", font_small, GREY)
+# Step 6: Vault Agent renders templates to certs-vol
+draw_arrow(va_x + 150 * S, va_y + 70 * S, cv_x + 130 * S, cv_y, color=ORANGE)
+draw_circle_number(va_x + 100 * S, va_y + 82 * S, 6)
+draw.text((va_x + 118 * S, va_y + 75 * S), "Render templates to", font=font_small, fill=GREEN)
+draw.text((va_x + 118 * S, va_y + 88 * S), "shared volume", font=font_small, fill=GREEN)
 
-# Step 6 - Login with cert + key (arrow from X.509 SVID to Vault)
-draw_arrow(svid_x + 125 * S, svid_y + 75 * S, ve_x + 80 * S, ve_y, color=GREY)
-draw_circle_number(svid_x + 30 * S, svid_y + 100 * S, 6)
-draw.text((svid_x + 47 * S, svid_y + 93 * S), "Login with cert + key", font=font_small, fill=GREEN)
+# ═══════════════════════════════════════════════════════════════════════════
+# Row 4: MCP Servers read from certs-vol
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ─── Vault Validates box (dashed, right) ───
-vv_x, vv_y = 800 * S, 550 * S
-draw_dashed_rect((vv_x, vv_y, vv_x + 280 * S, vv_y + 80 * S), outline=DASHED_BORDER)
-draw.text((vv_x + 10 * S, vv_y + 5 * S), "Vault Validates:", fill=YELLOW, font=font_heading)
-draw.text((vv_x + 10 * S, vv_y + 24 * S), "1. Cert chain against SPIRE CA", fill=GREY, font=font_small)
-draw.text((vv_x + 10 * S, vv_y + 39 * S), "2. SPIFFE ID from SAN extension", fill=GREY, font=font_small)
-draw.text((vv_x + 10 * S, vv_y + 54 * S), "3. Match role -> issue token + policies", fill=GREY, font=font_small)
+# ─── Data MCP Server ───
+dm_x, dm_y = 120 * S, 660 * S
+draw_rounded_rect((dm_x, dm_y, dm_x + 240 * S, dm_y + 60 * S), fill=DARK_GREEN_BG, outline=CYAN)
+text_centered(dm_x + 120 * S, dm_y + 8 * S, "data-mcp-server", font_heading, CYAN)
+text_centered(dm_x + 120 * S, dm_y + 30 * S, ":8001  (mTLS enabled)", font_small, GREY)
 
-# Arrow: Vault -> Vault Validates
-draw_arrow(ve_x + 260 * S, ve_y + 30 * S, vv_x, vv_y + 30 * S, color=GREY)
+# ─── Compute MCP Server ───
+cm_x, cm_y = 530 * S, 660 * S
+draw_rounded_rect((cm_x, cm_y, cm_x + 260 * S, cm_y + 60 * S), fill=DARK_GREEN_BG, outline=CYAN)
+text_centered(cm_x + 130 * S, cm_y + 8 * S, "compute-mcp-server", font_heading, CYAN)
+text_centered(cm_x + 130 * S, cm_y + 30 * S, ":8002  (mTLS enabled)", font_small, GREY)
 
-# ─── WorkloadSession box (bottom centre) ───
-ws_x, ws_y = 380 * S, 720 * S
-draw_rounded_rect((ws_x, ws_y, ws_x + 340 * S, ws_y + 60 * S), fill=DARK_YELLOW_BG, outline=ORANGE)
-text_centered(ws_x + 170 * S, ws_y + 8 * S, "WorkloadSession", font_heading, ORANGE)
-text_centered(ws_x + 170 * S, ws_y + 28 * S, "spiffe_id + vault_token + policies", font_small, GREY)
-text_centered(ws_x + 170 * S, ws_y + 42 * S, "token_ttl=3600s  |  policies=[operator-policy]", font_small, GREY)
+# Step 7: certs-vol -> Data MCP (read-only mount)
+draw_arrow(cv_x + 60 * S, cv_y + 70 * S, dm_x + 150 * S, dm_y, color=CYAN)
+draw_circle_number(cv_x - 30 * S, cv_y + 80 * S, 7)
+draw.text((cv_x - 12 * S, cv_y + 73 * S), "Mount :ro", font=font_small, fill=GREEN)
 
-# Step 7 - Session created (arrow from Vault to WorkloadSession)
-draw_arrow(ve_x + 130 * S, ve_y + 65 * S, ws_x + 170 * S, ws_y, color=GREY)
-draw_circle_number(ve_x + 145 * S, ve_y + 82 * S, 7)
-draw.text((ve_x + 162 * S, ve_y + 75 * S), "Session created", font=font_small, fill=GREEN)
-draw.text((ve_x + 162 * S, ve_y + 88 * S), "Ready for GCP requests", font=font_small, fill=GREY)
+# Step 7b: certs-vol -> Compute MCP (read-only mount)
+draw_arrow(cv_x + 200 * S, cv_y + 70 * S, cm_x + 100 * S, cm_y, color=CYAN)
 
-# ─── Automatic SVID Rotation (bottom) ───
-rot_x, rot_y = 420 * S, 810 * S
+# ─── _tls_available() callout ───
+tls_x, tls_y = 830 * S, 490 * S
+draw_dashed_rect((tls_x, tls_y, tls_x + 260 * S, tls_y + 70 * S), outline=DASHED_BORDER)
+draw.text((tls_x + 10 * S, tls_y + 5 * S), "http_transport.py:", fill=YELLOW, font=font_heading)
+draw.text((tls_x + 10 * S, tls_y + 26 * S), "_tls_available() checks for", fill=GREY, font=font_small)
+draw.text((tls_x + 10 * S, tls_y + 39 * S), "all 3 cert files at startup", fill=GREY, font=font_small)
+draw.text((tls_x + 10 * S, tls_y + 52 * S), "If found -> mTLS  |  Else -> HTTP", fill=GREEN, font=font_small)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Bottom: Automatic rotation
+# ═══════════════════════════════════════════════════════════════════════════
+rot_x, rot_y = 350 * S, 790 * S
 draw_circle_number(rot_x, rot_y + 10 * S, 8)
 draw.text((rot_x + 18 * S, rot_y - 2 * S), "Automatic SVID Rotation", fill=GREEN, font=font_heading)
-draw.text((rot_x + 18 * S, rot_y + 16 * S), "On token expiry, re-fetch from step 1", fill=GREY, font=font_small)
-draw.text((rot_x + 18 * S, rot_y + 30 * S), "No restarts, hot SVID rotation", fill=GREY, font=font_small)
+draw.text((rot_x + 18 * S, rot_y + 16 * S), "Vault Agent re-renders templates before cert expiry", fill=GREY, font=font_small)
+draw.text((rot_x + 18 * S, rot_y + 30 * S), "MCP servers pick up new certs — no restart required", fill=GREY, font=font_small)
+draw.text((rot_x + 18 * S, rot_y + 44 * S), "On Kubernetes: Vault Agent Injector automates the same flow", fill=GREY, font=font_small)
 
 # Save
 out = os.path.join(os.path.dirname(__file__), "spiffe-svid-acquisition.png")

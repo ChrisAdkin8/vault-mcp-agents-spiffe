@@ -4,6 +4,10 @@ This module creates a Starlette/ASGI application that serves an MCP server
 over the Streamable HTTP transport (MCP spec 2025-06-18).  It is the
 network-based counterpart to the stdio transport used in local development.
 
+When X.509 SVIDs are available at ``/etc/mcp/certs/`` (rendered by Vault
+Agent), the server enables mTLS — providing both transport encryption and
+cryptographic workload identity via the SPIFFE URI SAN in the certificate.
+
 Usage::
 
     from vault_mcp_agents.mcp.data_server import DataMCPServer
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from starlette.applications import Starlette
@@ -30,6 +35,17 @@ from vault_mcp_agents.mcp.base_server import BaseMCPServer
 from vault_mcp_agents.mcp.http_identity_middleware import IdentityContextMiddleware
 
 logger = logging.getLogger(__name__)
+
+# Default certificate paths rendered by Vault Agent
+CERT_DIR = Path("/etc/mcp/certs")
+CERT_FILE = CERT_DIR / "server.crt"
+KEY_FILE = CERT_DIR / "server.key"
+CA_FILE = CERT_DIR / "ca.crt"
+
+
+def _tls_available() -> bool:
+    """Check whether Vault Agent has rendered SVID certificates."""
+    return CERT_FILE.is_file() and KEY_FILE.is_file() and CA_FILE.is_file()
 
 
 async def _health(request: Request) -> JSONResponse:
@@ -81,11 +97,46 @@ def run_http_server(server: BaseMCPServer) -> None:
 
     Reads ``MCP_HOST`` (default ``0.0.0.0``) and ``MCP_PORT`` (default ``8000``)
     from environment variables.
+
+    When Vault Agent has rendered X.509 SVIDs to ``/etc/mcp/certs/``, the
+    server starts with mTLS enabled (TLS + client certificate verification).
+    Otherwise it falls back to plain HTTP for local development.
     """
+    import ssl
+
     import uvicorn
 
     app = create_http_app(server)
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8000"))
-    logger.info("MCP HTTP server listening on %s:%d", host, port)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+
+    if _tls_available():
+        logger.info(
+            "SVID certificates found at %s — starting with mTLS enabled",
+            CERT_DIR,
+        )
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(
+            certfile=str(CERT_FILE),
+            keyfile=str(KEY_FILE),
+        )
+        ssl_context.load_verify_locations(cafile=str(CA_FILE))
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+
+        logger.info("MCP HTTPS server listening on %s:%d (mTLS)", host, port)
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level="info",
+            ssl_certfile=str(CERT_FILE),
+            ssl_keyfile=str(KEY_FILE),
+            ssl_ca_certs=str(CA_FILE),
+        )
+    else:
+        logger.info(
+            "No SVID certificates at %s — starting in plain HTTP mode",
+            CERT_DIR,
+        )
+        logger.info("MCP HTTP server listening on %s:%d", host, port)
+        uvicorn.run(app, host=host, port=port, log_level="info")

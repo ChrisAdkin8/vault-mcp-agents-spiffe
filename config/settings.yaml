@@ -56,12 +56,12 @@ gcp:
   project_id: "<Your GCP project id goes here>"
   region: "us-central1"
 
-# SPIFFE workload identity (containerised deployment only)
-spiffe:
-  enabled: false         # Set to true in Docker Compose / container mode
-  trust_domain: "vault-mcp-demo"
-  auth_mount: "spiffe"
-  workload_api_endpoint: "unix:///run/spire/sockets/agent.sock"
+# Vault Agent sidecar (containerised deployment only)
+# Vault Agent authenticates via AppRole and renders X.509 SVIDs
+# with SPIFFE URI SANs to the certificate directory below.
+vault_agent:
+  cert_dir: "/etc/mcp/certs"      # Directory where Vault Agent writes SVIDs
+  trust_domain: "my-trust-domain"  # SPIFFE trust domain in URI SANs
 
 # Audit logging
 audit:

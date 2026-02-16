@@ -14,6 +14,8 @@ This project mitigates three threats from the [OWASP Top 10 for Agentic Applicat
 
 ## Trust boundaries
 
+Local (stdio transport):
+
 ```
 ┌──────────────────────────────────────────────────┐
 │                  User's machine                  │
@@ -37,7 +39,39 @@ This project mitigates three threats from the [OWASP Top 10 for Agentic Applicat
                           └──────────────────────────────┘
 ```
 
-In containerised deployment, the trust boundary extends to the Docker bridge network, with MCP servers running as separate containers communicating over HTTP.
+Containerised (HTTP + mTLS via Vault Agent):
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                   Docker network (mcp-net)                    │
+│                                                              │
+│            ┌──────────────────────────────┐                  │
+│            │       Vault Agent            │                  │
+│            │   (AppRole → PKI → SVIDs)    │                  │
+│            └──────┬───────────────┬───────┘                  │
+│         certs-vol │               │ certs-vol                │
+│                   ▼               ▼                          │
+│  ┌────────┐ mTLS ┌──────────────┐ ┌──────────────┐          │
+│  │agent-  │─────▶│ data-mcp-    │ │ compute-mcp- │          │
+│  │cli     │─────▶│ server :8001 │ │ server :8002 │          │
+│  └───┬────┘      └──────┬───────┘ └──────┬───────┘          │
+│      │                  │                │                   │
+└──────┼──────────────────┼────────────────┼───────────────────┘
+       │                  │                │
+       │     ┌────────────▼────────────────▼───────────────┐
+       └────▶│      Vault Enterprise (network)             │
+             │  - authenticates human (userpass)            │
+             │  - issues X.509 SVIDs via PKI               │
+             │  - issues GCP tokens                         │
+             │  - enforces path policies                    │
+             └──────────────────────┬──────────────────────┘
+                                    │
+             ┌──────────────────────▼──────────────────────┐
+             │           GCP APIs (network)                │
+             └─────────────────────────────────────────────┘
+```
+
+In the containerised deployment, the trust boundary extends to the Docker bridge network. MCP servers run as separate containers communicating over mTLS, using X.509 SVIDs with SPIFFE URI SANs rendered by the Vault Agent sidecar — no static secrets exist in the container images.
 
 ## Defence-in-depth layers
 
@@ -132,19 +166,18 @@ Even if one layer is misconfigured, the other still caps credential lifetime.
 | MCP ports exposed externally | MCP server ports should **not** be exposed outside the Docker network |
 | Vault token in transit | Use TLS between all services in production |
 | Header spoofing | Use network policies to restrict which services can reach MCP servers |
-| Workload impersonation | SPIFFE provides cryptographic workload identity as an additional layer |
+| Workload impersonation | Vault Agent renders X.509 SVIDs with SPIFFE URI SANs for mTLS between services |
 
 ### Production recommendations
 
 For production deployments beyond the proof-of-concept:
 
-1. **Enable TLS** between all services (Vault, MCP servers, agent).
+1. **mTLS is enabled by default** — Vault Agent renders X.509 SVIDs that MCP servers use for mutual TLS.
 2. **Use network policies** to restrict MCP server access to authorised agent containers only.
-3. **Enable SPIFFE** for cryptographic workload identity — no static secrets in containers.
-4. **Use a remote Terraform backend** with encryption for state files containing GCP service account keys.
-5. **Rotate Vault root token** — the dev-mode root token is for development only.
-6. **Configure Vault audit logging** in addition to application-level audit logging.
-7. **Consider mTLS** between agent and MCP servers for mutual authentication.
+3. **Use a remote Terraform backend** with encryption for state files containing GCP service account keys.
+4. **Rotate Vault root token** — the dev-mode root token is for development only.
+5. **Configure Vault audit logging** in addition to application-level audit logging.
+6. **Rotate SVIDs** — configure Vault Agent template `max_stale` and PKI role TTLs for regular certificate rotation.
 
 ## Session expiry
 

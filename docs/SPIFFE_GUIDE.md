@@ -1,6 +1,6 @@
 # SPIFFE Workload Identity Guide
 
-This guide explains how SPIFFE (Secure Production Identity Framework for Everyone) is used in this project to provide cryptographic workload identity for MCP server containers.
+This guide explains how SPIFFE (Secure Production Identity Framework for Everyone) is used in this project to provide cryptographic workload identity for MCP server containers, using Vault Agent as a sidecar to mint X.509 SVIDs.
 
 ## What is SPIFFE?
 
@@ -12,19 +12,14 @@ Key concepts:
 |---------|-------------|
 | **SPIFFE ID** | A URI that uniquely identifies a workload: `spiffe://trust-domain/path` |
 | **SVID** | An X.509 certificate (or JWT) that proves a workload's SPIFFE ID |
-| **Trust Domain** | A security boundary (like a Kerberos realm): `vault-mcp-demo` |
-| **Workload API** | A local Unix socket that workloads use to fetch their SVIDs |
+| **Trust Domain** | A security boundary (like a Kerberos realm): `my-trust-domain` |
 
 ## Why SPIFFE in this project?
 
-Without SPIFFE, an MCP server container has no way to prove its identity to Vault. It would need a static Vault token or AppRole credentials baked into the container image — exactly the kind of long-lived secret we are trying to avoid.
+Without SPIFFE, MCP server containers have no way to cryptographically prove their identity. The SPIFFE URI SAN embedded in each certificate provides:
 
-With SPIFFE:
-
-1. Each MCP server container receives an X.509 SVID from the SPIRE agent
-2. The container presents this SVID to Vault's SPIFFE auth method
-3. Vault verifies the certificate chain and issues a short-lived Vault token
-4. No static secrets exist in the container image or environment
+1. **Mutual TLS (mTLS)** — transport encryption and mutual authentication between services
+2. **Workload identity** — each certificate carries a SPIFFE ID that identifies the workload
 
 This adds a **workload identity layer** to the existing defence-in-depth model:
 
@@ -33,194 +28,226 @@ This adds a **workload identity layer** to the existing defence-in-depth model:
 │  Layer 1: Human Identity                        │
 │  Vault userpass → Session (token + role)         │
 ├─────────────────────────────────────────────────┤
-│  Layer 2: Workload Identity (SPIFFE)            │
-│  X.509 SVID → WorkloadSession (Vault token)     │
+│  Layer 2: Workload Identity (SPIFFE via Vault)  │
+│  Vault Agent → X.509 SVID → mTLS                │
 ├─────────────────────────────────────────────────┤
 │  Layer 3: Application Policy                    │
 │  capabilities.yaml → (role, agent) → tools      │
 └─────────────────────────────────────────────────┘
 ```
 
+## How it works: Vault Agent sidecar
+
+Instead of requiring a separate SPIRE infrastructure, this project uses **Vault Agent** as a sidecar to automatically mint and renew X.509 SVIDs using Vault's built-in PKI secrets engine.
+
+### The orchestration flow
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌──────────────┐     ┌──────────────┐
+│    Vault     │────>│ Terraform setup  │────>│ Vault Agent  │────>│ MCP Servers  │
+│  (healthy)   │     │ (PKI + AppRole)  │     │ (sidecar)    │     │ (mTLS)       │
+└─────────────┘     └──────────────────┘     └──────────────┘     └──────────────┘
+                     Writes role_id &          Reads creds,         Mounts cert
+                     secret_id to              authenticates,       volume, starts
+                     shared volume             renders SVIDs        with mTLS
+```
+
+1. **Vault** starts in dev mode and becomes healthy
+2. **Terraform** waits for Vault, then:
+   - Configures the PKI secrets engine (root CA, SPIFFE-compliant role)
+   - Configures AppRole auth with a policy allowing `pki/issue/mcp-server`
+   - Writes the AppRole `role_id` and `secret_id` to a shared Docker volume (`/creds/`)
+3. **Vault Agent** starts after Terraform completes, then:
+   - Reads AppRole credentials from the shared volume
+   - Authenticates to Vault via AppRole
+   - Uses template blocks to request certificates from `pki/issue/mcp-server`
+   - Renders `server.crt`, `server.key`, and `ca.crt` to the certificate volume (`/etc/mcp/certs/`)
+4. **MCP Servers** mount the certificate volume and start with mTLS enabled
+
+### No static secrets
+
+The AppRole credentials are generated fresh by Terraform on each `docker compose up`. The Vault Agent reads them once to bootstrap authentication, then uses its Vault token to continuously render certificates. No secrets are baked into container images.
+
+## Why the Vault Agent sidecar pattern?
+
+The Vault Agent sidecar is the preferred approach for SVID provisioning because it aligns with the **pull model** that Vault uses for all secret consumption, and it maps directly to the Kubernetes deployment model that is the intended direction of travel.
+
+### Vault is always a pull model
+
+Vault — including Vault Enterprise — never pushes secrets to consumers. Something must always ask Vault for a secret. The three options for who does the asking are:
+
+| Approach | How it works | Trade-offs |
+|----------|-------------|------------|
+| **Vault Agent sidecar** | A long-running sidecar process authenticates once, then continuously renders and rotates secrets via templates | Handles rotation automatically; maps 1:1 to K8s sidecar injector; application reads files from disk |
+| **Init container** | A one-shot container fetches secrets at startup and writes them to a shared volume, then exits | No rotation — if the certificate expires, the workload must restart; acceptable for static secrets but not for short-lived SVIDs |
+| **Direct API integration** | The application itself calls the Vault API to fetch and renew secrets | Requires every application to embed Vault client logic; couples application code to Vault; harder to audit and standardise |
+
+For X.509 SVIDs, **certificate rotation is critical**. SVIDs are intentionally short-lived (1-hour default TTL in this project). An init container cannot renew them — the workload would need to restart every hour. The Vault Agent sidecar handles rotation transparently: it watches template outputs and re-renders certificates before they expire.
+
+### Docker Compose as a stepping stone to Kubernetes
+
+The Docker Compose stack in this project manually configures what Kubernetes automates. The mapping is direct:
+
+| Docker Compose (manual) | Kubernetes (automated) |
+|--------------------------|------------------------|
+| Terraform writes AppRole `role_id` / `secret_id` to a shared Docker volume | The Vault Agent Injector admission controller injects credentials automatically |
+| `vault-agent` service defined explicitly in `docker-compose.yaml` | Annotation `vault.hashicorp.com/agent-inject: "true"` causes the admission controller to inject the sidecar |
+| Certificate volume mounts configured per-service | The injector handles volume mounts and init/sidecar container injection |
+| Startup ordering via `depends_on` | Kubernetes handles pod scheduling and container ordering |
+| AppRole auth method | Kubernetes auth method (already pre-configured in `terraform/vault_auth.tf`) |
+
+By using the same sidecar pattern in Docker Compose, the architecture translates directly to Kubernetes without changing the MCP server code or the certificate consumption model. The MCP servers always read certificates from `/etc/mcp/certs/` regardless of whether a manually configured Vault Agent or an injector-managed sidecar put them there.
+
+### The Kubernetes auth method is pre-configured
+
+The Terraform configuration already includes a Kubernetes auth backend (`terraform/vault_auth.tf`) with a role binding for service account `mcp-sa` in the `default` namespace. When migrating to Kubernetes:
+
+1. Deploy the Vault Agent Injector into the cluster
+2. Annotate MCP server pods with `vault.hashicorp.com/agent-inject` annotations
+3. Switch from AppRole to Kubernetes auth (the pod's service account token authenticates to Vault automatically)
+4. The same PKI role (`mcp-server`) and policy (`mcp-policy`) work unchanged
+
 ## Trust domain configuration
 
-This project uses the trust domain `vault-mcp-demo`. Each agent container has a SPIFFE ID within this domain:
+This project uses the trust domain `my-trust-domain`. The SPIFFE ID embedded in the SVID is:
 
-| Container | SPIFFE ID |
-|-----------|-----------|
-| data-mcp-server | `spiffe://vault-mcp-demo/agent/data_agent` |
-| compute-mcp-server | `spiffe://vault-mcp-demo/agent/compute_agent` |
+```
+spiffe://my-trust-domain/ns/default/sa/mcp
+```
 
-These are mapped to agent IDs in `policies/capabilities.yaml`:
+This is mapped to agent IDs in `policies/capabilities.yaml`:
 
 ```yaml
 trust_domain: "vault-mcp-demo"
 spiffe_identity_map:
-  "spiffe://vault-mcp-demo/agent/data_agent": "data_agent"
-  "spiffe://vault-mcp-demo/agent/compute_agent": "compute_agent"
+  "spiffe://my-trust-domain/ns/default/sa/mcp": "mcp_server"
 ```
 
-## Vault Enterprise SPIFFE auth method
+## PKI configuration
 
-### Prerequisites
+### Root CA
 
-- **Vault Enterprise 1.21+** with a valid license
-- The SPIFFE auth method is an Enterprise-only feature
+Terraform creates an internal root CA (`MCP Root CA`) with a 10-year TTL and 4096-bit RSA key. This is the trust anchor for all SVIDs.
 
-### How it works
+### PKI role
 
-Vault Enterprise's SPIFFE auth method accepts X.509 SVIDs for authentication. When a workload presents its SVID:
+The `mcp-server` PKI role allows:
 
-1. Vault verifies the certificate was issued by the trusted SPIRE CA
-2. Vault extracts the SPIFFE ID from the certificate's SAN (Subject Alternative Name)
-3. Vault matches the SPIFFE ID against configured roles
-4. Vault issues a token with the policies defined for that role
+- Common names: `mcp-server`, `localhost`, `svc.cluster.local` (and subdomains)
+- SPIFFE URI SANs matching: `spiffe://my-trust-domain/ns/*/sa/*`
+- IP SANs (for direct IP access)
+- RSA 2048-bit keys with 1-hour default TTL (24-hour max)
 
-### Roles configured by this project
+### AppRole and policy
 
-The `scripts/setup_vault_enterprise.sh` script creates two roles:
+The `mcp-policy` Vault policy grants:
+
+```hcl
+path "pki/issue/mcp-server" {
+  capabilities = ["create", "update"]
+}
+```
+
+This allows the Vault Agent (authenticated via AppRole) to request certificates from the PKI role.
+
+## Vault Agent configuration
+
+The agent configuration lives at `config/agent.hcl`:
+
+```hcl
+auto_auth {
+  method "approle" {
+    mount_path = "auth/approle"
+    config = {
+      role_id_file_path   = "/vault/creds/role_id"
+      secret_id_file_path = "/vault/creds/secret_id"
+    }
+  }
+}
+
+template {
+  destination = "/etc/mcp/certs/server.crt"
+  contents = <<EOH
+{{- with secret "pki/issue/mcp-server" "common_name=mcp-server" "uri_sans=spiffe://my-trust-domain/ns/default/sa/mcp" -}}
+{{ .Data.certificate }}
+{{- end }}
+EOH
+}
+```
+
+The agent renders three files:
+
+| File | Content |
+|------|---------|
+| `server.crt` | X.509 certificate with SPIFFE URI SAN |
+| `server.key` | RSA private key |
+| `ca.crt` | Issuing CA certificate (for client verification) |
+
+## mTLS in MCP servers
+
+The HTTP transport (`src/vault_mcp_agents/mcp/http_transport.py`) detects certificates at `/etc/mcp/certs/` on startup:
+
+- **Certs present:** Server starts with mTLS (TLS + client certificate verification)
+- **No certs:** Server starts in plain HTTP mode (local development)
+
+This is automatic — no configuration changes needed between environments.
+
+## Verifying the SVIDs
+
+After running `docker compose up`, verify the certificates:
 
 ```bash
-# Data agent role
-vault write auth/spiffe/roles/data-agent \
-    spiffe_id_allowed="spiffe://vault-mcp-demo/agent/data_agent" \
-    token_policies="operator-policy" \
-    token_ttl="1h" \
-    token_max_ttl="4h"
+# Check files exist
+docker exec data-mcp-server ls -l /etc/mcp/certs/
 
-# Compute agent role
-vault write auth/spiffe/roles/compute-agent \
-    spiffe_id_allowed="spiffe://vault-mcp-demo/agent/compute_agent" \
-    token_policies="operator-policy" \
-    token_ttl="1h" \
-    token_max_ttl="4h"
+# Verify the SPIFFE URI SAN
+docker exec data-mcp-server openssl x509 \
+    -in /etc/mcp/certs/server.crt -text -noout | grep "URI"
 ```
 
-Each role:
-- Allows a specific SPIFFE ID
-- Grants the `operator-policy` (which allows access to the GCP secrets engine)
-- Issues tokens with a 1-hour TTL (max 4 hours)
+Expected output:
 
-## SpiffeAuthenticator
-
-The `SpiffeAuthenticator` class (`src/vault_mcp_agents/auth/spiffe_authenticator.py`) handles SVID retrieval and Vault authentication:
-
-```python
-from vault_mcp_agents.auth.spiffe_authenticator import SpiffeAuthenticator
-
-auth = SpiffeAuthenticator(
-    vault_addr="http://vault:8200",
-    trust_domain="vault-mcp-demo",
-    spiffe_auth_mount="spiffe",
-)
-
-# Fetches SVID from SPIRE agent, authenticates to Vault
-session = auth.authenticate_workload()
-print(session.spiffe_id)     # spiffe://vault-mcp-demo/agent/data_agent
-print(session.vault_token)   # s.xxxxx (short-lived Vault token)
 ```
-
-### How SVID retrieval works
-
-The authenticator uses the `py-spiffe` library to communicate with the local SPIRE agent via the Workload API:
-
-1. The SPIRE agent runs as a sidecar or DaemonSet
-2. It exposes a Unix domain socket (default: `/run/spire/sockets/agent.sock`)
-3. The `WorkloadApiClient` connects to this socket
-4. The SPIRE agent attests the workload (verifies it should receive the SVID)
-5. The workload receives its X.509 certificate and private key
-
-### Configuration
-
-In `config/settings.yaml`:
-
-```yaml
-spiffe:
-  enabled: false         # Set to true in container deployments
-  trust_domain: "vault-mcp-demo"
-  auth_mount: "spiffe"
-  workload_api_endpoint: "unix:///run/spire/sockets/agent.sock"
-```
-
-The `SPIFFE_ENDPOINT_SOCKET` environment variable can also be used to set the Workload API endpoint (this is the standard SPIFFE convention).
-
-## Setting up SPIRE (production)
-
-For a production deployment, you need a SPIRE server and agent:
-
-### 1. Deploy SPIRE server
-
-The SPIRE server manages the CA and issues SVIDs. In Kubernetes, deploy it as a StatefulSet. In Docker Compose, run it as a service with a persistent volume for the CA keys.
-
-### 2. Deploy SPIRE agent
-
-The SPIRE agent runs on each node and exposes the Workload API socket. Workloads connect to this socket to retrieve their SVIDs.
-
-### 3. Register workload entries
-
-Create SPIRE registration entries for each MCP server:
-
-```bash
-# Register data agent
-spire-server entry create \
-    -spiffeID spiffe://vault-mcp-demo/agent/data_agent \
-    -parentID spiffe://vault-mcp-demo/node/docker-node \
-    -selector docker:label:com.example.service:data-mcp-server
-
-# Register compute agent
-spire-server entry create \
-    -spiffeID spiffe://vault-mcp-demo/agent/compute_agent \
-    -parentID spiffe://vault-mcp-demo/node/docker-node \
-    -selector docker:label:com.example.service:compute-mcp-server
-```
-
-### 4. Configure Vault trust
-
-Upload the SPIRE server's CA certificate to Vault so it can verify SVIDs:
-
-```bash
-vault write auth/spiffe/config \
-    trust_domain="vault-mcp-demo" \
-    ca_cert=@/path/to/spire-ca.pem
+URI:spiffe://my-trust-domain/ns/default/sa/mcp
 ```
 
 ## Troubleshooting
 
-### "SPIFFE auth method not found"
+### Certificates not appearing
 
-The SPIFFE auth method is only available in Vault Enterprise 1.21+. Verify:
+The Vault Agent may not have started or authenticated yet:
 
-```bash
-vault version  # Must show Enterprise
-vault auth list  # Should include "spiffe/"
-```
+1. Check Vault Agent logs: `docker compose logs vault-agent`
+2. Verify Terraform completed: `docker compose logs terraform-setup`
+3. Check that AppRole credentials exist: look for `role_id` and `secret_id` in the `shared-creds` volume
 
-### "No SVID available"
+### "Permission denied" from Vault Agent
 
-The SPIRE agent is not running or the workload is not registered:
-
-1. Check the SPIRE agent is running: `spire-agent healthcheck`
-2. Check registration entries: `spire-server entry show`
-3. Verify the socket path matches `SPIFFE_ENDPOINT_SOCKET`
-
-### "Certificate verification failed"
-
-The SPIRE CA certificate is not configured in Vault:
+The AppRole token does not have the `mcp-policy`. Verify:
 
 ```bash
-vault read auth/spiffe/config
-# Verify ca_cert is set and matches the SPIRE server CA
+export VAULT_ADDR=http://localhost:8200
+export VAULT_TOKEN=dev-root-token
+
+vault read auth/approle/role/mcp-role
+vault read sys/policy/mcp-policy
 ```
 
-### "Role not found for SPIFFE ID"
+### Certificate verification fails
 
-The SPIFFE ID in the SVID does not match any configured Vault role:
+The CA certificate does not match. This can happen if Vault was restarted without clearing volumes:
 
 ```bash
-vault list auth/spiffe/roles
-vault read auth/spiffe/roles/data-agent
-# Verify spiffe_id_allowed matches the workload's SPIFFE ID exactly
+docker compose down -v  # Remove all volumes
+docker compose up       # Fresh start
 ```
 
-### SPIFFE disabled in local development
+### mTLS not enabled on MCP servers
 
-SPIFFE is disabled by default (`spiffe.enabled: false` in settings.yaml). In local development with stdio transport, workloads authenticate using the human's Vault token passed through the `IdentityContext`. SPIFFE is only needed in containerised deployments where workloads need their own identity.
+Check the MCP server logs for the startup message:
+
+```bash
+docker compose logs data-mcp-server | grep -i "svid\|mtls\|http"
+```
+
+If you see "No SVID certificates" the cert volume may not be mounted or the agent hasn't rendered certs yet.

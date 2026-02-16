@@ -153,16 +153,6 @@ Tests the Starlette HTTP server without running a real MCP server:
 | Requests without `X-Identity-Context` header return 401 |
 | Malformed identity headers return 401 |
 
-### `test_spiffe_authenticator.py`
-
-Tests `SpiffeAuthenticator` with mocked SVID retrieval and Vault auth:
-
-| What it verifies |
-|-----------------|
-| Successful SVID fetch and Vault login produce a `WorkloadSession` |
-| Missing `py-spiffe` library raises a descriptive error |
-| Vault authentication failure propagates correctly |
-
 ### `test_mcp_http_adapter.py`
 
 Tests the HTTP client adapter with mocked HTTP connections:
@@ -182,9 +172,9 @@ Full end-to-end: authenticate as a human, resolve policy, obtain a GCP token via
 
 Connect to MCP servers running in Docker over HTTP, list tools, and invoke a tool.
 
-### `tests/integration/test_spiffe_auth_e2e.py`
+### `tests/integration/test_vault_agent_certs_e2e.py`
 
-Authenticate a workload container via SPIFFE/SPIRE and verify the resulting Vault token has the expected policies.
+Verify that Vault Agent has rendered X.509 SVIDs to the shared certificate volume, that certificates contain the expected SPIFFE URI SAN, and that the PKI infrastructure (AppRole, PKI mount, roles) is correctly configured in Vault.
 
 ## pytest configuration
 

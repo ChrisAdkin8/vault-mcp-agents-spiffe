@@ -1,4 +1,4 @@
-# Full stack: Vault Enterprise + MCP Servers + Agent CLI.
+# Full stack: Vault Enterprise + Terraform bootstrap + Vault Agent + MCP Servers + Agent CLI.
 #
 # Prerequisites:
 #   1. Copy docker/.env.example to docker/.env and fill in values.
@@ -13,14 +13,16 @@
 #   docker compose -f docker-compose.dev.yaml up -d
 
 services:
-  # ---------- Vault Enterprise ----------
+  # ---------- 1. Vault Enterprise ----------
   vault:
     image: hashicorp/vault-enterprise:1.21-ent
+    container_name: vault-server
     ports:
       - "8200:8200"
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: "dev-root-token"
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://127.0.0.1:8200"
       VAULT_LICENSE: "${VAULT_LICENSE}"
     cap_add:
       - IPC_LOCK
@@ -29,31 +31,53 @@ services:
     healthcheck:
       test: ["CMD", "vault", "status"]
       interval: 5s
-      timeout: 3s
-      retries: 10
+      timeout: 5s
+      retries: 5
     networks:
       - mcp-net
 
-  # ---------- One-shot Vault configuration ----------
-  vault-init:
-    image: hashicorp/vault-enterprise:1.21-ent
+  # ---------- 2. Terraform (setup automation) ----------
+  # Waits for Vault, applies configuration (PKI, AppRole, policies),
+  # and writes AppRole credentials to a shared volume for the Agent.
+  terraform-setup:
+    image: hashicorp/terraform:latest
+    container_name: terraform-bootstrap
     depends_on:
       vault:
         condition: service_healthy
+    volumes:
+      - ./terraform:/app
+      - shared-creds:/creds
+    working_dir: /app
     environment:
       VAULT_ADDR: "http://vault:8200"
       VAULT_TOKEN: "dev-root-token"
-    volumes:
-      - ./scripts:/scripts:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        sh /scripts/setup_vault.sh
-        sh /scripts/setup_vault_enterprise.sh
+    command: >
+      sh -c "terraform init && terraform apply -auto-approve"
     networks:
       - mcp-net
 
-  # ---------- Data MCP Server (GCS + BigQuery) ----------
+  # ---------- 3. Vault Agent (sidecar) ----------
+  # Reads AppRole credentials from the shared volume, authenticates
+  # to Vault, and renders X.509 SVIDs to the certificate volume.
+  vault-agent:
+    image: hashicorp/vault-enterprise:1.21-ent
+    container_name: vault-agent
+    restart: always
+    depends_on:
+      terraform-setup:
+        condition: service_completed_successfully
+    volumes:
+      - ./config/agent.hcl:/etc/vault/agent.hcl:ro
+      - shared-creds:/vault/creds:ro
+      - certs-vol:/etc/mcp/certs
+    environment:
+      VAULT_LICENSE: "${VAULT_LICENSE}"
+    command: ["vault", "agent", "-config=/etc/vault/agent.hcl"]
+    networks:
+      - mcp-net
+
+  # ---------- 4. Data MCP Server (GCS + BigQuery) ----------
   data-mcp-server:
     build:
       context: .
@@ -68,8 +92,10 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      vault-init:
-        condition: service_completed_successfully
+      vault-agent:
+        condition: service_started
+    volumes:
+      - certs-vol:/etc/mcp/certs:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 10s
@@ -78,7 +104,7 @@ services:
     networks:
       - mcp-net
 
-  # ---------- Compute MCP Server (GCE) ----------
+  # ---------- 5. Compute MCP Server (GCE) ----------
   compute-mcp-server:
     build:
       context: .
@@ -93,8 +119,10 @@ services:
     ports:
       - "8002:8002"
     depends_on:
-      vault-init:
-        condition: service_completed_successfully
+      vault-agent:
+        condition: service_started
+    volumes:
+      - certs-vol:/etc/mcp/certs:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
       interval: 10s
@@ -103,7 +131,7 @@ services:
     networks:
       - mcp-net
 
-  # ---------- Agent CLI ----------
+  # ---------- 6. Agent CLI ----------
   agent-cli:
     build:
       context: .
@@ -117,6 +145,8 @@ services:
         condition: service_healthy
       compute-mcp-server:
         condition: service_healthy
+    volumes:
+      - certs-vol:/etc/mcp/certs:ro
     stdin_open: true
     tty: true
     networks:
@@ -124,6 +154,8 @@ services:
 
 volumes:
   vault-data:
+  shared-creds:
+  certs-vol:
 
 networks:
   mcp-net:

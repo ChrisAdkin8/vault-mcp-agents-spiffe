@@ -1,16 +1,16 @@
 # Docker Compose Guide
 
-This guide explains how to run the full containerised stack: Vault Enterprise, MCP servers, and the agent CLI.
+This guide explains how to run the full containerised stack: Vault Enterprise, Terraform bootstrap, Vault Agent sidecar, MCP servers, and the agent CLI.
 
 ## Prerequisites
 
 - Docker and Docker Compose v2+
-- A **Vault Enterprise license key** (required for the SPIFFE auth method)
+- A **Vault Enterprise license key**
 - An LLM API key (Anthropic or OpenAI)
 
 ### Obtaining a Vault Enterprise license
 
-A Vault Enterprise license is required because this stack uses the SPIFFE auth method, which is an Enterprise-only feature. Options:
+Options:
 
 1. **HashiCorp Vault Enterprise trial** — request at [hashicorp.com/products/vault/trial](https://www.hashicorp.com/products/vault/trial)
 2. **HCP Vault** — managed Vault with Enterprise features included
@@ -39,14 +39,15 @@ ANTHROPIC_API_KEY=sk-ant-...
 docker compose --env-file docker/.env up -d --build
 ```
 
-This starts five services:
+This starts six services:
 
 | Service | Description | Port |
 |---------|-------------|------|
 | `vault` | Vault Enterprise 1.21 in dev mode | 8200 |
-| `vault-init` | One-shot: configures Vault (users, policies, SPIFFE), then exits | — |
-| `data-mcp-server` | Data MCP server (GCS + BigQuery tools) | 8001 |
-| `compute-mcp-server` | Compute MCP server (GCE tools) | 8002 |
+| `terraform-setup` | One-shot: configures Vault (PKI, AppRole, policies), writes creds to shared volume, then exits | — |
+| `vault-agent` | Sidecar: authenticates via AppRole, renders X.509 SVIDs to cert volume | — |
+| `data-mcp-server` | Data MCP server (GCS + BigQuery tools) with mTLS | 8001 |
+| `compute-mcp-server` | Compute MCP server (GCE tools) with mTLS | 8002 |
 | `agent-cli` | Interactive LangChain agent CLI | — |
 
 ### 3. Wait for services to be healthy
@@ -55,9 +56,22 @@ This starts five services:
 docker compose --env-file docker/.env ps
 ```
 
-All services should show `healthy` (except `vault-init`, which exits after completion, and `agent-cli`, which waits for input).
+All services should show `healthy` (except `terraform-setup` which exits after completion, `vault-agent` which runs continuously, and `agent-cli` which waits for input).
 
-### 4. Run the agent
+### 4. Verify SVIDs (optional)
+
+```bash
+# Check certificate files exist
+docker exec data-mcp-server ls -l /etc/mcp/certs/
+
+# Verify the SPIFFE URI SAN in the certificate
+docker exec data-mcp-server openssl x509 \
+    -in /etc/mcp/certs/server.crt -text -noout | grep "URI"
+```
+
+Expected: `URI:spiffe://my-trust-domain/ns/default/sa/mcp`
+
+### 5. Run the agent
 
 ```bash
 docker compose --env-file docker/.env exec agent-cli vault-mcp-agents
@@ -65,13 +79,13 @@ docker compose --env-file docker/.env exec agent-cli vault-mcp-agents
 
 You will be prompted to log in with one of the test users (alice/bob/carol), select an agent, and interact with it.
 
-### 5. Tear down
+### 6. Tear down
 
 ```bash
 docker compose --env-file docker/.env down
 ```
 
-Add `-v` to also remove the Vault data volume:
+Add `-v` to also remove all volumes (Vault data, credentials, certificates):
 
 ```bash
 docker compose --env-file docker/.env down -v
@@ -86,29 +100,46 @@ docker compose --env-file docker/.env down -v
                          │  (Enterprise)│
                          └──────┬───────┘
                                 │
-                    ┌───────────┼───────────┐
-                    │           │           │
-            ┌───────▼──────┐   │   ┌───────▼──────┐
-            │ data-mcp-    │   │   │ compute-mcp- │
-            │ server :8001 │   │   │ server :8002 │
-            └───────▲──────┘   │   └───────▲──────┘
-                    │          │           │
-                    └──────────┤───────────┘
-                               │
-                        ┌──────▼──────┐
-                        │  agent-cli  │
-                        │  (tty)      │
-                        └─────────────┘
-
-              All services on: mcp-net (bridge)
+               ┌────────────────┼────────────────┐
+               │                │                │
+       ┌───────▼──────┐ ┌──────▼───────┐ ┌──────▼──────┐
+       │  terraform-  │ │ vault-agent  │ │  agent-cli  │
+       │  setup       │ │ (sidecar)    │ │  (tty)      │
+       │  (one-shot)  │ │              │ └──────┬──────┘
+       └──────┬───────┘ └──────┬───────┘        │
+              │                │                │
+     writes role_id/    renders SVIDs    ┌──────┴──────┐
+     secret_id to       to cert volume   │             │
+     shared-creds vol   (certs-vol)      │             │
+                               │         │             │
+                    ┌──────────┤─────────┤             │
+                    │          │         │             │
+            ┌───────▼──────┐  │  ┌──────▼──────┐      │
+            │ data-mcp-    │  │  │ compute-mcp-│      │
+            │ server :8001 │  │  │ server :8002│      │
+            │ (mTLS)       │  │  │ (mTLS)      │      │
+            └──────────────┘  │  └─────────────┘      │
+                              │                       │
+            All services on: mcp-net (bridge)         │
+            Vault Agent renders X.509 SVIDs           │
+            MCP servers use SVIDs for mTLS            │
 ```
 
 ### Startup order
 
 1. `vault` starts and becomes healthy (health check: `vault status`)
-2. `vault-init` runs `setup_vault.sh` + `setup_vault_enterprise.sh`, then exits
-3. `data-mcp-server` and `compute-mcp-server` start (wait for `vault-init` to complete)
-4. `agent-cli` starts (waits for both MCP servers to be healthy)
+2. `terraform-setup` waits for Vault, runs `terraform init && terraform apply`, configures PKI + AppRole + policies, writes AppRole credentials to `shared-creds` volume, then exits
+3. `vault-agent` starts after Terraform exits successfully, reads AppRole credentials, authenticates, renders SVIDs to `certs-vol`
+4. `data-mcp-server` and `compute-mcp-server` start after `vault-agent` (mount `certs-vol` for mTLS)
+5. `agent-cli` starts after both MCP servers are healthy
+
+## Volumes
+
+| Volume | Purpose | Used by |
+|--------|---------|---------|
+| `vault-data` | Vault persistent data | `vault` |
+| `shared-creds` | AppRole role_id and secret_id files | `terraform-setup` (write), `vault-agent` (read) |
+| `certs-vol` | Rendered X.509 SVIDs (server.crt, server.key, ca.crt) | `vault-agent` (write), MCP servers + agent-cli (read) |
 
 ## Environment variables
 
@@ -132,6 +163,7 @@ These are set in the `docker-compose.yaml` and should not normally be overridden
 | Variable | Service | Value |
 |----------|---------|-------|
 | `VAULT_DEV_ROOT_TOKEN_ID` | vault | `dev-root-token` |
+| `VAULT_ADDR` / `VAULT_TOKEN` | terraform-setup | `http://vault:8200` / `dev-root-token` |
 | `MCP_TRANSPORT` | MCP servers | `http` |
 | `MCP_PORT` | data-mcp-server | `8001` |
 | `MCP_PORT` | compute-mcp-server | `8002` |
@@ -157,6 +189,27 @@ Multi-stage build for the agent CLI:
 - Same structure as the MCP server Dockerfile
 - Entry point is `vault-mcp-agents` (the console script)
 - Runs with `stdin_open: true` and `tty: true` for interactive use
+
+## Migration path to Kubernetes
+
+The Docker Compose stack is designed as a stepping stone toward Kubernetes deployment. The sidecar pattern used here maps directly to the Vault Agent Injector in Kubernetes:
+
+| Docker Compose (this stack) | Kubernetes equivalent |
+|-------------------------------|----------------------|
+| Terraform writes AppRole creds to `shared-creds` volume | Vault Agent Injector admission controller injects credentials automatically |
+| `vault-agent` service in `docker-compose.yaml` | `vault.hashicorp.com/agent-inject: "true"` pod annotation triggers automatic sidecar injection |
+| `certs-vol` shared volume | Injected shared volume managed by the sidecar |
+| `depends_on` for startup ordering | Kubernetes init containers and readiness probes |
+| AppRole auth | Kubernetes auth (pod service account token — already pre-configured in `terraform/vault_auth.tf`) |
+
+The MCP servers are agnostic to how certificates arrive at `/etc/mcp/certs/`. Whether a manually configured Vault Agent or a Kubernetes-injected sidecar renders the SVIDs, the application code is identical.
+
+To migrate:
+
+1. Deploy the [Vault Agent Injector](https://developer.hashicorp.com/vault/docs/platform/k8s/injector) into the cluster
+2. Annotate MCP server pod specs with Vault Agent injection annotations
+3. Switch from AppRole auth to Kubernetes auth (the Terraform configuration already includes the K8s auth backend and `mcp-server` role)
+4. The same PKI role, policy, and certificate paths work unchanged
 
 ## Local development (Vault OSS)
 
@@ -184,8 +237,11 @@ docker compose --env-file docker/.env logs -f
 # Specific service
 docker compose --env-file docker/.env logs -f data-mcp-server
 
-# Vault init output (useful for debugging configuration)
-docker compose --env-file docker/.env logs vault-init
+# Terraform bootstrap output (useful for debugging configuration)
+docker compose --env-file docker/.env logs terraform-setup
+
+# Vault Agent output (useful for debugging certificate rendering)
+docker compose --env-file docker/.env logs vault-agent
 ```
 
 ## Health checks
@@ -243,21 +299,49 @@ docker compose --env-file docker/.env logs vault
 grep VAULT_LICENSE docker/.env
 ```
 
+### Terraform fails
+
+**Symptom:** `terraform-setup` exits with a non-zero code.
+
+**Common causes:**
+- Vault not healthy yet (should be handled by `depends_on`)
+- Stale Terraform state from a previous run
+
+**Fix:**
+```bash
+docker compose --env-file docker/.env logs terraform-setup
+
+# If state is stale, clear volumes and restart
+docker compose --env-file docker/.env down -v
+docker compose --env-file docker/.env up -d --build
+```
+
+### Vault Agent not rendering certificates
+
+**Symptom:** `/etc/mcp/certs/` is empty in MCP server containers.
+
+**Common causes:**
+- Terraform did not write AppRole credentials
+- AppRole policy misconfigured
+
+**Fix:**
+```bash
+docker compose --env-file docker/.env logs vault-agent
+docker compose --env-file docker/.env logs terraform-setup
+```
+
 ### MCP servers fail health check
 
 **Symptom:** `data-mcp-server` or `compute-mcp-server` stuck in "starting" state.
 
 **Common causes:**
-- `vault-init` failed (Vault configuration incomplete)
+- Vault Agent hasn't rendered certificates yet
 - Build errors in the Dockerfile
 
 **Fix:**
 ```bash
-# Check vault-init completed successfully
-docker compose --env-file docker/.env logs vault-init
-
-# Check MCP server logs
 docker compose --env-file docker/.env logs data-mcp-server
+docker compose --env-file docker/.env logs vault-agent
 ```
 
 ### Agent CLI cannot connect to MCP servers

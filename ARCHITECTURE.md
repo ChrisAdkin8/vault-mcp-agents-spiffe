@@ -92,13 +92,15 @@ The adapter is intentionally thin — it does no access control, caching, or tra
 
 **Where it lives:** `src/vault_mcp_agents/audit/logger.py`, `src/vault_mcp_agents/audit/formatter.py`. See [Audit Logging Guide](docs/AUDIT_LOGGING.md).
 
-### 8. SPIFFE Workload Identity
+### 8. SPIFFE Workload Identity via Vault Agent
 
-**Problem:** In containerised deployments, MCP servers need to authenticate to Vault without static secrets baked into the container image.
+**Problem:** In containerised deployments, MCP servers need cryptographic workload identity and encrypted transport without static secrets baked into the container image.
 
-**Solution:** Each container receives an X.509 SVID from a SPIRE agent, presents it to Vault Enterprise's SPIFFE auth method, and receives a short-lived Vault token. The SPIFFE ID is mapped to an agent ID via the `spiffe_identity_map` in `capabilities.yaml`.
+**Solution:** A Vault Agent sidecar authenticates to Vault via AppRole (credentials written to a shared volume by Terraform), then uses Vault's PKI secrets engine to render X.509 SVIDs with SPIFFE URI SANs. MCP servers mount the certificate volume and start with mTLS enabled. No SPIRE infrastructure is needed — Vault's PKI engine serves as the certificate authority.
 
-**Where it lives:** `src/vault_mcp_agents/auth/spiffe_authenticator.py`, `src/vault_mcp_agents/auth/workload_session.py`. See [SPIFFE Guide](docs/SPIFFE_GUIDE.md).
+**Why a sidecar:** The sidecar pattern is chosen because the direction of travel is toward Kubernetes deployment. In K8s, the Vault Agent Injector admission controller automatically injects the same sidecar — so the Docker Compose stack manually configures what Kubernetes automates. This means the MCP server code and certificate consumption model (`/etc/mcp/certs/`) remain identical across both environments. The sidecar also handles certificate rotation, which is critical for short-lived SVIDs (an init container pattern cannot renew certificates without restarting the workload). See [SPIFFE Guide](docs/SPIFFE_GUIDE.md) for a detailed comparison of alternatives.
+
+**Where it lives:** `config/agent.hcl`, `terraform/vault_pki.tf`, `terraform/vault_auth.tf`, `terraform/creds_export.tf`, `src/vault_mcp_agents/mcp/http_transport.py`. See [SPIFFE Guide](docs/SPIFFE_GUIDE.md).
 
 ### 9. Dual Transport (Stdio + HTTP)
 
@@ -111,6 +113,8 @@ The adapter is intentionally thin — it does no access control, caching, or tra
 ## Security model
 
 ### Trust boundaries
+
+Local (stdio transport):
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -133,6 +137,38 @@ The adapter is intentionally thin — it does no access control, caching, or tra
                           ┌───────────────▼──────────────┐
                           │        GCP APIs (network)    │
                           └──────────────────────────────┘
+```
+
+Containerised (mTLS via Vault Agent):
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                   Docker network (mcp-net)                    │
+│                                                              │
+│            ┌──────────────────────────────┐                  │
+│            │       Vault Agent            │                  │
+│            │   (AppRole → PKI → SVIDs)    │                  │
+│            └──────┬───────────────┬───────┘                  │
+│         certs-vol │               │ certs-vol                │
+│                   ▼               ▼                          │
+│  ┌────────┐ mTLS ┌──────────────┐ ┌──────────────┐          │
+│  │agent-  │─────▶│ data-mcp-    │ │ compute-mcp- │          │
+│  │cli     │─────▶│ server :8001 │ │ server :8002 │          │
+│  └───┬────┘      └──────┬───────┘ └──────┬───────┘          │
+│      │                  │                │                   │
+└──────┼──────────────────┼────────────────┼───────────────────┘
+       │                  │                │
+       │     ┌────────────▼────────────────▼───────────────┐
+       └────▶│      Vault Enterprise (network)             │
+             │  - authenticates human (userpass)            │
+             │  - issues X.509 SVIDs via PKI               │
+             │  - issues GCP tokens                         │
+             │  - enforces path policies                    │
+             └──────────────────────┬──────────────────────┘
+                                    │
+             ┌──────────────────────▼──────────────────────┐
+             │           GCP APIs (network)                │
+             └─────────────────────────────────────────────┘
 ```
 
 ### What each layer enforces
@@ -199,19 +235,17 @@ CLI displays response
 
 ## Infrastructure provisioning
 
-The GCP secrets engine configuration is managed by Terraform (`terraform/`). This replaces
-manual `vault write` commands with a declarative, version-controlled approach.
+The infrastructure is managed by Terraform (`terraform/`), split across files by concern:
 
-| Resource | Terraform resource type | Purpose |
+| File | Resources | Purpose |
 |---|---|---|
-| GCP service account (Vault) | `google_service_account` | Identity Vault uses to impersonate agent service accounts |
-| Agent service accounts | `google_service_account` | Per-agent identities (`data-agent-gcp`, `compute-agent-gcp`) with their own IAM roles |
-| SA IAM bindings | `google_project_iam_member` | Grants admin, key-admin, token-creator, and project IAM admin roles |
-| SA key | `google_service_account_key` | Key material passed to Vault (lives in TF state only) |
-| Vault GCP backend | `vault_gcp_secret_backend` | Enables and configures the GCP secrets mount |
-| Vault GCP impersonated accounts | `vault_gcp_secret_impersonated_account` | Defines `data-agent-gcp` and `compute-agent-gcp` with 5-minute token TTL |
+| `gcp.tf` | `google_service_account`, `google_project_iam_member`, `google_service_account_key`, `google_service_account_iam_member` | All GCP service accounts (Vault + agents), IAM bindings, SA keys, and impersonation grants |
+| `vault_gcp_secrets.tf` | `vault_gcp_secret_backend`, `vault_gcp_secret_impersonated_account` | Vault GCP secrets engine and impersonated accounts (`data-agent-gcp`, `compute-agent-gcp`) with 5-minute token TTL |
+| `vault_pki.tf` | `vault_mount`, `vault_pki_secret_backend_root_cert`, `vault_pki_secret_backend_config_urls`, `vault_pki_secret_backend_role` | PKI engine for SPIFFE X.509 SVIDs, root CA, and SPIFFE-compliant certificate role |
+| `vault_auth.tf` | `vault_policy`, `vault_auth_backend`, `vault_approle_auth_backend_role`, `vault_kubernetes_auth_backend_role` | Vault policies, AppRole auth (Docker), and Kubernetes auth (K8s migration) |
+| `creds_export.tf` | `local_file` | Writes AppRole `role_id` and `secret_id` to `/creds/` for the Vault Agent sidecar |
 
-The Vault-internal resources (userpass auth, policies, test users) remain in `scripts/setup_vault.sh`
+The Vault-internal resources (userpass auth, test users) remain in `scripts/setup_vault.sh`
 because they are simple, idempotent shell commands that do not benefit from Terraform's state management.
 
 **Security note:** Terraform state contains the GCP service account key. For production, use a

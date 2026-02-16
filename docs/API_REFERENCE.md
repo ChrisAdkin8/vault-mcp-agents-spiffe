@@ -9,9 +9,7 @@ vault_mcp_agents/
 ├── main.py               # CLI entry point
 ├── auth/                  # Authentication layer
 │   ├── vault_authenticator.py
-│   ├── session.py
-│   ├── spiffe_authenticator.py
-│   └── workload_session.py
+│   └── session.py
 ├── vault/                 # Vault credential brokering
 │   └── gcp_credentials.py
 ├── policy/                # Access control
@@ -62,30 +60,6 @@ class Session:
 
 ---
 
-## `vault_mcp_agents.auth.workload_session`
-
-### `WorkloadSession`
-
-Immutable session for workloads authenticated via SPIFFE.
-
-```python
-@dataclasses.dataclass(frozen=True)
-class WorkloadSession:
-    spiffe_id: str                      # e.g. spiffe://vault-mcp-demo/agent/data_agent
-    vault_token: str                    # Vault token from SPIFFE auth
-    token_policies: frozenset[str]      # Vault policies
-    created_at: datetime.datetime       # UTC timestamp
-    ttl_seconds: int                    # Token TTL
-```
-
-**Properties:**
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `is_expired` | `bool` | `True` if token has expired |
-
----
-
 ## `vault_mcp_agents.auth.vault_authenticator`
 
 ### `VaultAuthenticator`
@@ -124,38 +98,6 @@ Vault policies are mapped to application roles via `_POLICY_TO_ROLE`. The first 
 | `operator-policy` | `operator` |
 | `analyst-policy` | `analyst` |
 | `viewer-policy` | `viewer` |
-
----
-
-## `vault_mcp_agents.auth.spiffe_authenticator`
-
-### `SpiffeAuthenticator`
-
-Authenticates a workload using its SPIFFE SVID against Vault Enterprise.
-
-```python
-class SpiffeAuthenticator:
-    def __init__(
-        self,
-        vault_addr: str,
-        trust_domain: str,
-        spiffe_auth_mount: str = "spiffe",
-    ) -> None: ...
-
-    def authenticate_workload(self) -> WorkloadSession: ...
-    def is_enabled(self) -> bool: ...
-```
-
-**Methods:**
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `authenticate_workload()` | `WorkloadSession` | Fetch SVID from SPIRE agent, authenticate to Vault. Raises `SpiffeAuthenticationError`. |
-| `is_enabled()` | `bool` | `True` if `SPIFFE_ENDPOINT_SOCKET` environment variable is set. |
-
-### `SpiffeAuthenticationError`
-
-Raised when SVID retrieval or Vault SPIFFE auth fails.
 
 ---
 
@@ -372,7 +314,7 @@ def create_http_app(server: BaseMCPServer) -> Starlette: ...
 
 ### `run_http_server(server)`
 
-Creates the app and runs it with Uvicorn. Reads `MCP_HOST` and `MCP_PORT` from environment.
+Creates the app and runs it with Uvicorn. Reads `MCP_HOST` and `MCP_PORT` from environment. When X.509 SVIDs are present at `/etc/mcp/certs/` (rendered by Vault Agent), the server starts with mTLS enabled. Otherwise falls back to plain HTTP.
 
 ```python
 def run_http_server(server: BaseMCPServer) -> None: ...

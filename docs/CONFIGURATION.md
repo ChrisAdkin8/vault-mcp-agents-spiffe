@@ -122,27 +122,23 @@ gcp:
   region: "us-central1"
 ```
 
-### `spiffe` — SPIFFE workload identity
+### `vault_agent` — Vault Agent sidecar (containerised deployment)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | bool | `false` | Enable SPIFFE workload authentication. |
-| `trust_domain` | string | `vault-mcp-demo` | SPIFFE trust domain. |
-| `auth_mount` | string | `spiffe` | Vault auth mount path for SPIFFE. |
-| `workload_api_endpoint` | string | `unix:///run/spire/sockets/agent.sock` | SPIRE Workload API socket path. |
+| `cert_dir` | string | `/etc/mcp/certs` | Directory where Vault Agent writes X.509 SVIDs. |
+| `trust_domain` | string | `my-trust-domain` | SPIFFE trust domain used in URI SANs. |
 
-SPIFFE is only needed in containerised deployments where workloads authenticate with their own identity. In local development (stdio transport), workloads use the human's Vault token.
+In containerised deployments, the Vault Agent sidecar authenticates via AppRole and renders X.509 SVIDs with SPIFFE URI SANs to the certificate directory. MCP servers detect these certificates and enable mTLS automatically.
 
-The `SPIFFE_ENDPOINT_SOCKET` environment variable can override the `workload_api_endpoint` setting.
+In local development (stdio transport), no certificates are needed — workloads use the human's Vault token.
 
 **Example:**
 
 ```yaml
-spiffe:
-  enabled: false
-  trust_domain: "vault-mcp-demo"
-  auth_mount: "spiffe"
-  workload_api_endpoint: "unix:///run/spire/sockets/agent.sock"
+vault_agent:
+  cert_dir: "/etc/mcp/certs"
+  trust_domain: "my-trust-domain"
 ```
 
 ### `audit` — Audit logging
@@ -238,5 +234,4 @@ These environment variables affect runtime behaviour:
 | `MCP_TRANSPORT` | MCP servers | Transport mode: `http` or `stdio` (defaults to `stdio`). |
 | `MCP_HOST` | MCP servers (HTTP) | Bind address for HTTP mode (defaults to `0.0.0.0`). |
 | `MCP_PORT` | MCP servers (HTTP) | Port for HTTP mode (defaults to `8000`). |
-| `SPIFFE_ENDPOINT_SOCKET` | SPIFFE authenticator | Override for SPIRE Workload API socket path. |
 | `VAULT_LICENSE` | Docker Compose | Vault Enterprise license key (containerised deployment). |

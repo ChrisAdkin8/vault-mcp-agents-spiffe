@@ -39,7 +39,7 @@ The 5-minute ceiling is enforced at two independent layers, so both must agree b
 | Concern | How it's handled |
 |---|---|
 | Human authentication | Vault userpass (pluggable to LDAP / OIDC) |
-| Workload identity | SPIFFE X.509 SVIDs via Vault Enterprise auth ([SPIFFE guide](docs/SPIFFE_GUIDE.md)) |
+| Workload identity | X.509 SVIDs with SPIFFE URI SANs via Vault Agent + PKI ([SPIFFE guide](docs/SPIFFE_GUIDE.md)) |
 | Agent identity | Vault AppRole per agent |
 | GCP credential issuance | Vault GCP secrets engine → short-lived OAuth2 tokens |
 | Tool-level access control | YAML policy file mapping `(human_role, agent_id)` → allowed MCP tools |
@@ -58,49 +58,61 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for diagrams and pattern descriptions.
 
 ## Quick start
 
+The entire stack — Vault Enterprise, MCP servers, and the agent CLI — runs via Docker Compose. No local Python install, virtual environment, or manual Vault configuration is required.
+
 ### Prerequisites
 
-- **Python 3.11 – 3.13** (3.14 is **not** supported — see below)
-- Docker (for local Vault)
+- **Docker** and **Docker Compose** (v2)
+- A **Vault Enterprise license** (obtain one from [hashicorp.com/products/vault/pricing](https://www.hashicorp.com/products/vault/pricing))
 - A GCP project with APIs enabled (Storage, BigQuery, Compute)
 - An LLM API key (Anthropic or OpenAI)
 
-#### Checking your Python version
+### 1. Provide your Vault Enterprise license
+
+The `docker-compose.yaml` stack uses Vault Enterprise, which requires a license. You can provide the license in one of two ways:
+
+**Option A — Environment file (recommended):**
 
 ```bash
-python3 --version
+cp docker/.env.example docker/.env
 ```
 
-If the output shows 3.14 or later, you need to use an earlier version explicitly.
-On macOS with Homebrew:
+Edit `docker/.env` and paste your license key:
+
+```
+VAULT_LICENSE=02MV4UU43BK5H...  # your full license string
+ANTHROPIC_API_KEY=sk-ant-...     # or set OPENAI_API_KEY instead
+```
+
+**Option B — Shell environment variable:**
 
 ```bash
-brew install python@3.13
-python3.13 --version   # confirm it prints Python 3.13.x
+export VAULT_LICENSE="02MV4UU43BK5H..."
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-> **Why not Python 3.14?** Python 3.14 changed how type annotations are
-> evaluated at runtime. LangChain's Pydantic-based classes trigger
-> `TypeError: 'function' object is not subscriptable` during import,
-> making the library unusable on 3.14+.
+> **Where do I get a Vault Enterprise license?** You can request a trial license
+> from [hashicorp.com/products/vault/trial](https://www.hashicorp.com/products/vault/trial)
+> or use a license provided by your organisation. The license is a long base64-encoded
+> string that starts with `02MV4UU43BK5H`.
 
-### 1. Start Vault
+### 2. Configure GCP settings
 
-```bash
-docker compose up -d
-export VAULT_ADDR=http://127.0.0.1:8200
-export VAULT_TOKEN=dev-root-token
+Edit `config/settings.yaml` and set your GCP project ID:
+
+```yaml
+# config/settings.yaml
+gcp:
+  project_id: "your-gcp-project-id"
+  region: "us-central1"
 ```
 
-### 2. Configure Vault
+> **Why is this needed?** The data agent uses OAuth2 access tokens from Vault
+> rather than service account key files. Unlike key-based credentials, OAuth2
+> tokens do not carry project metadata, so the GCP client libraries cannot
+> infer the project automatically.
 
-```bash
-bash scripts/setup_vault.sh
-```
-
-This creates three test users (alice/operator, bob/analyst, carol/viewer) and writes Vault policies.
-
-### 2b. Configure GCP secrets engine (Terraform)
+### 3. Configure GCP secrets engine (Terraform)
 
 The GCP secrets engine is provisioned via Terraform, which creates a GCP service account, grants it the necessary IAM roles, and configures Vault — with no service-account key file on disk.
 
@@ -116,21 +128,6 @@ terraform init
 terraform apply
 ```
 
-You must also set the same GCP project ID in `config/settings.yaml` so that the MCP data server can pass it to the GCS and BigQuery clients:
-
-```yaml
-# config/settings.yaml
-gcp:
-  project_id: "your-gcp-project-id"   # must match terraform.tfvars
-  region: "us-central1"
-```
-
-> **Why is this needed?** The data agent uses OAuth2 access tokens from Vault
-> rather than service account key files. Unlike key-based credentials, OAuth2
-> tokens do not carry project metadata, so the GCP client libraries cannot
-> infer the project automatically. The project ID in `settings.yaml` is
-> passed through the `IdentityContext` to every GCS and BigQuery client call.
-
 This creates:
 - A GCP service account for Vault itself (`vault-gcp-secrets@<project>.iam.gserviceaccount.com`)
 - IAM bindings for `serviceAccountAdmin`, `serviceAccountKeyAdmin`, `serviceAccountTokenCreator`, and `projectIamAdmin`
@@ -139,57 +136,29 @@ This creates:
 
 To tear down: `terraform destroy`. See [`terraform/README.md`](terraform/README.md) for full details.
 
-### 3. Create and activate a virtual environment
+### 4. Start the stack
 
 ```bash
-python3.13 -m venv .venv
-source .venv/bin/activate      # Linux / macOS
-# .venv\Scripts\activate       # Windows
+docker compose --env-file docker/.env up -d --build
 ```
 
-You must activate the virtual environment in every new shell session before
-running or developing the project:
+This brings up:
+- **Vault Enterprise** — listening on `http://localhost:8200`
+- **terraform-setup** — a one-shot container that configures Vault (PKI, AppRole, policies) and writes AppRole credentials to a shared volume
+- **vault-agent** — a sidecar that authenticates via AppRole and renders X.509 SVIDs to a certificate volume
+- **data-mcp-server** — GCS + BigQuery MCP server on port 8001 (with mTLS)
+- **compute-mcp-server** — GCE Compute MCP server on port 8002 (with mTLS)
+- **agent-cli** — the interactive agent container
+
+### 5. Run the agent
 
 ```bash
-source .venv/bin/activate
-```
-
-### 4. Install
-
-```bash
-pip install -e ".[dev]"
-```
-
-### 5. Set LLM API key
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-# or
-export OPENAI_API_KEY=sk-...
-```
-
-### 6. Configure the config/settings.yaml file
-
-Add your GCP project id to the config/settings.yaml file, this is an excerpt from the bottom of the file
-where this goes:
-```
-# GCP project default
-gcp:
-  project_id: "<Your GCP project id goes here>"
-  region: "us-central1"
-```
-
-### 7. Run
-
-```bash
-vault-mcp-agents
-# or
-python -m vault_mcp_agents.main --verbose
+docker compose --env-file docker/.env exec agent-cli vault-mcp-agents
 ```
 
 You will be prompted to log in, select an agent, and then interact with it in natural language.
 
-The setup script (`scripts/setup_vault.sh`) creates three preconfigured users with different access levels:
+The `vault-init` container automatically creates three preconfigured users with different access levels:
 
 | Username | Password | Role | Access Level |
 |---|---|---|---|
@@ -197,13 +166,41 @@ The setup script (`scripts/setup_vault.sh`) creates three preconfigured users wi
 | `bob` | `bob-pass` | analyst | Read-only GCS + BigQuery, limited compute |
 | `carol` | `carol-pass` | viewer | Minimal read-only data access |
 
-### 8. Run tests
+### 6. Stop the stack
 
 ```bash
-pytest -v
+docker compose --env-file docker/.env down
 ```
 
-Tests for the policy engine, session, and identity context run without Vault or GCP.
+### Running tests
+
+To run the test suite inside the agent container:
+
+```bash
+docker compose --env-file docker/.env exec agent-cli pytest -v
+```
+
+Tests for the policy engine, session, and identity context run without GCP.
+
+### Local development (Vault OSS only)
+
+For local development with stdio transport (no containers for MCP servers or agents), a lightweight Vault OSS compose file is provided:
+
+```bash
+docker compose -f docker-compose.dev.yaml up -d
+export VAULT_ADDR=http://127.0.0.1:8200
+export VAULT_TOKEN=dev-root-token
+bash scripts/setup_vault.sh
+```
+
+This requires a local Python environment (3.11–3.13):
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+vault-mcp-agents
+```
 
 ## Testing the 5-minute credential lease
 
@@ -309,17 +306,22 @@ T+expired: EXPECTED FAILURE — Forbidden: ...
 ```
 vault-mcp-agents/
 ├── config/
-│   └── settings.yaml                 # Vault, agent, MCP, LLM, SPIFFE, audit configuration
+│   ├── settings.yaml                 # Vault, agent, MCP, LLM, audit configuration
+│   └── agent.hcl                     # Vault Agent sidecar config (AppRole auth + SVID templates)
 ├── policies/
 │   └── capabilities.yaml             # (role, agent) → allowed tools + SPIFFE identity map
 ├── scripts/
 │   ├── setup_vault.sh                # Vault dev provisioning (auth, policies, users)
-│   ├── setup_vault_enterprise.sh     # Vault Enterprise SPIFFE auth method configuration
 │   └── run_integration_tests.sh      # End-to-end integration test runner
 ├── terraform/
-│   ├── main.tf                       # GCP SAs + Vault GCP secrets engine + impersonated accounts
+│   ├── main.tf                       # Provider configuration (Google + Vault + Local)
+│   ├── gcp.tf                        # GCP service accounts, IAM bindings, SA keys
+│   ├── vault_gcp_secrets.tf          # Vault GCP secrets engine + impersonated accounts
+│   ├── vault_pki.tf                  # PKI engine, root CA, SPIFFE-compliant role
+│   ├── vault_auth.tf                 # Vault policy, AppRole + Kubernetes auth backends
+│   ├── creds_export.tf               # Writes AppRole creds to shared volume for Vault Agent
 │   ├── variables.tf                  # Input variables (project ID, region, etc.)
-│   ├── outputs.tf                    # Impersonated account names, SA email
+│   ├── outputs.tf                    # GCP outputs (SA email, mount path)
 │   ├── versions.tf                   # Provider version constraints
 │   ├── terraform.tfvars.example      # Template for local variable values
 │   └── README.md                     # Terraform-specific usage guide
@@ -343,9 +345,7 @@ vault-mcp-agents/
 │   ├── main.py                       # CLI entry point
 │   ├── auth/
 │   │   ├── vault_authenticator.py    # Human login via Vault (userpass/LDAP/OIDC)
-│   │   ├── session.py                # Immutable human session context
-│   │   ├── spiffe_authenticator.py   # Workload authentication via X.509 SVID
-│   │   └── workload_session.py       # Immutable workload session context
+│   │   └── session.py                # Immutable human session context
 │   ├── vault/
 │   │   └── gcp_credentials.py        # GCP token retrieval from Vault
 │   ├── policy/
@@ -375,12 +375,11 @@ vault-mcp-agents/
 │   ├── test_gcp_credential_ttl.py    # 5-minute TTL enforcement
 │   ├── test_audit_logger.py          # Audit event generation tests
 │   ├── test_http_transport.py        # HTTP transport tests
-│   ├── test_spiffe_authenticator.py  # SPIFFE authentication tests
-│   ├── test_mcp_http_adapter.py      # HTTP adapter tests
+│   ├── test_mcp_http_adapter.py         # HTTP adapter tests
 │   └── integration/
-│       ├── test_credential_flow_e2e.py  # Full auth → policy → token flow
-│       ├── test_http_mcp_e2e.py         # HTTP transport end-to-end
-│       └── test_spiffe_auth_e2e.py      # SPIFFE workload auth end-to-end
+│       ├── test_credential_flow_e2e.py     # Full auth → policy → token flow
+│       ├── test_http_mcp_e2e.py            # HTTP transport end-to-end
+│       └── test_vault_agent_certs_e2e.py   # Vault Agent SVID certificate tests
 └── pyproject.toml
 ```
 
@@ -393,7 +392,7 @@ vault-mcp-agents/
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Full reference for `settings.yaml` and `capabilities.yaml` |
 | [docs/AUDIT_LOGGING.md](docs/AUDIT_LOGGING.md) | Audit event types, JSON format, token hashing |
 | [docs/HTTP_TRANSPORT.md](docs/HTTP_TRANSPORT.md) | Streamable HTTP transport and identity delivery |
-| [docs/SPIFFE_GUIDE.md](docs/SPIFFE_GUIDE.md) | SPIFFE workload identity with Vault Enterprise |
+| [docs/SPIFFE_GUIDE.md](docs/SPIFFE_GUIDE.md) | SPIFFE workload identity via Vault Agent sidecar |
 | [docs/DOCKER_COMPOSE_GUIDE.md](docs/DOCKER_COMPOSE_GUIDE.md) | Containerised deployment with Docker Compose |
 | [docs/TESTING.md](docs/TESTING.md) | Testing strategy, fixtures, and how to run tests |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Development setup, conventions, and contribution guide |

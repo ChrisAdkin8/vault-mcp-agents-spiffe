@@ -1,4 +1,4 @@
-# vault-mcp-agents-spiffe
+# vault-mcp-agents
 
 This repo demonstrates mitigations for three threats from the [OWASP Top 10 for Agentic Applications (2026)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) using HashiCorp Vault-brokered, 5-minute TTL GCP credentials:
 

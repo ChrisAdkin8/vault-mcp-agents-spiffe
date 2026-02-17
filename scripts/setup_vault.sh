@@ -2,9 +2,15 @@
 # ---------------------------------------------------------------------------
 # Configures a local Vault dev instance for the vault-mcp-agents project.
 #
+# NOTE: For Docker Compose usage, this script is superseded by
+#       scripts/vault_init.sh which is run automatically by the vault-init
+#       container and also configures PKI, AppRole, and GCP secrets engine.
+#       This script is retained for the local dev workflow
+#       (docker-compose.dev.yaml + stdio transport).
+#
 # Prerequisites:
 #   - Vault CLI installed
-#   - Vault dev server running (docker compose up -d)
+#   - Vault dev server running (docker compose -f docker-compose.dev.yaml up -d)
 #   - VAULT_ADDR and VAULT_TOKEN exported
 #
 # Usage:

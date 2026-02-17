@@ -96,11 +96,11 @@ The adapter is intentionally thin — it does no access control, caching, or tra
 
 **Problem:** In containerised deployments, MCP servers need cryptographic workload identity and encrypted transport without static secrets baked into the container image.
 
-**Solution:** A Vault Agent sidecar authenticates to Vault via AppRole (credentials written to a shared volume by Terraform), then uses Vault's PKI secrets engine to render X.509 SVIDs with SPIFFE URI SANs. MCP servers mount the certificate volume and start with mTLS enabled. No SPIRE infrastructure is needed — Vault's PKI engine serves as the certificate authority.
+**Solution:** A Vault Agent sidecar authenticates to Vault via AppRole (credentials written to a shared volume by the `vault-init` container), then uses Vault's PKI secrets engine to render X.509 SVIDs with SPIFFE URI SANs. MCP servers mount the certificate volume and start with mTLS enabled. No SPIRE infrastructure is needed — Vault's PKI engine serves as the certificate authority.
 
 **Why a sidecar:** The sidecar pattern is chosen because the direction of travel is toward Kubernetes deployment. In K8s, the Vault Agent Injector admission controller automatically injects the same sidecar — so the Docker Compose stack manually configures what Kubernetes automates. This means the MCP server code and certificate consumption model (`/etc/mcp/certs/`) remain identical across both environments. The sidecar also handles certificate rotation, which is critical for short-lived SVIDs (an init container pattern cannot renew certificates without restarting the workload). See [SPIFFE Guide](docs/SPIFFE_GUIDE.md) for a detailed comparison of alternatives.
 
-**Where it lives:** `config/agent.hcl`, `terraform/vault_pki.tf`, `terraform/vault_auth.tf`, `terraform/creds_export.tf`, `src/vault_mcp_agents/mcp/http_transport.py`. See [SPIFFE Guide](docs/SPIFFE_GUIDE.md).
+**Where it lives:** `config/agent.hcl`, `scripts/vault_init.sh`, `src/vault_mcp_agents/mcp/http_transport.py`. See [SPIFFE Guide](docs/SPIFFE_GUIDE.md).
 
 ### 9. Dual Transport (Stdio + HTTP)
 
@@ -235,19 +235,30 @@ CLI displays response
 
 ## Infrastructure provisioning
 
-The infrastructure is managed by Terraform (`terraform/`), split across files by concern:
+Infrastructure provisioning is split into two layers:
+
+### GCP resources (Terraform)
+
+GCP service accounts and IAM bindings are managed by Terraform (`terraform/`):
 
 | File | Resources | Purpose |
 |---|---|---|
 | `gcp.tf` | `google_service_account`, `google_project_iam_member`, `google_service_account_key`, `google_service_account_iam_member` | All GCP service accounts (Vault + agents), IAM bindings, SA keys, and impersonation grants |
-| `vault_gcp_secrets.tf` | `vault_gcp_secret_backend`, `vault_gcp_secret_impersonated_account` | Vault GCP secrets engine and impersonated accounts (`data-agent-gcp`, `compute-agent-gcp`) with 5-minute token TTL |
-| `vault_pki.tf` | `vault_mount`, `vault_pki_secret_backend_root_cert`, `vault_pki_secret_backend_config_urls`, `vault_pki_secret_backend_role` | PKI engine for SPIFFE X.509 SVIDs, root CA, and SPIFFE-compliant certificate role |
-| `vault_auth.tf` | `vault_policy`, `vault_auth_backend`, `vault_approle_auth_backend_role`, `vault_kubernetes_auth_backend_role` | Vault policies, AppRole auth (Docker), and Kubernetes auth (K8s migration) |
-| `creds_export.tf` | `local_file` | Writes AppRole `role_id` and `secret_id` to `/creds/` for the Vault Agent sidecar |
-
-The Vault-internal resources (userpass auth, test users) remain in `scripts/setup_vault.sh`
-because they are simple, idempotent shell commands that do not benefit from Terraform's state management.
 
 **Security note:** Terraform state contains the GCP service account key. For production, use a
 [remote backend](https://developer.hashicorp.com/terraform/language/settings/backends/configuration)
 with encryption (e.g., GCS backend with CMEK).
+
+### Vault configuration (vault-init)
+
+All Vault configuration is handled by `scripts/vault_init.sh`, run automatically by the `vault-init` container in Docker Compose:
+
+| Section | What it configures |
+|---|---|
+| PKI engine | `pki/` mount, internal root CA (RSA 4096, 10yr), issuing/CRL URLs, `mcp-server` SPIFFE-compliant role |
+| Vault policy | `mcp-policy` granting `pki/issue/mcp-server` access |
+| AppRole auth | `auth/approle/role/mcp-role`, exports `role_id` and `secret_id` to shared volume |
+| GCP secrets engine | `gcp/` mount with 300s lease TTL, `data-agent-gcp` and `compute-agent-gcp` impersonated accounts (5-min TTL) |
+| Userpass auth | `operator-policy`, `analyst-policy`, `viewer-policy`, test users (alice, bob, carol) |
+
+The GCP secrets engine section is conditional — it only runs if a GCP service account key file is provided. This allows the stack to start without GCP for testing PKI/SPIFFE functionality.

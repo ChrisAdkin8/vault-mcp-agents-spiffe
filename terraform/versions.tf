@@ -6,13 +6,5 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.0"
     }
-    vault = {
-      source  = "hashicorp/vault"
-      version = "~> 4.0"
-    }
-    local = {
-      source  = "hashicorp/local"
-      version = "~> 2.0"
-    }
   }
 }

@@ -1,8 +1,10 @@
-# Full stack: Vault Enterprise + Terraform bootstrap + Vault Agent + MCP Servers + Agent CLI.
+# Full stack: Vault Enterprise + vault-init bootstrap + Vault Agent + MCP Servers + Agent CLI.
 #
 # Prerequisites:
 #   1. Copy docker/.env.example to docker/.env and fill in values.
 #   2. Ensure VAULT_LICENSE is set (either in docker/.env or as an env var).
+#   3. (Optional) Set GCP_SA_KEY_FILE, DATA_AGENT_SA_EMAIL, and
+#      COMPUTE_AGENT_SA_EMAIL in docker/.env to enable the GCP secrets engine.
 #
 # Usage:
 #   docker compose --env-file docker/.env up -d --build
@@ -36,24 +38,26 @@ services:
     networks:
       - mcp-net
 
-  # ---------- 2. Terraform (setup automation) ----------
-  # Waits for Vault, applies configuration (PKI, AppRole, policies),
-  # and writes AppRole credentials to a shared volume for the Agent.
-  terraform-setup:
-    image: hashicorp/terraform:latest
-    container_name: terraform-bootstrap
+  # ---------- 2. Vault Init (setup automation) ----------
+  # Waits for Vault, configures PKI, AppRole, policies, GCP secrets engine,
+  # userpass auth + test users, and writes AppRole credentials to a shared volume.
+  vault-init:
+    image: hashicorp/vault-enterprise:1.21-ent
+    container_name: vault-init
     depends_on:
       vault:
         condition: service_healthy
     volumes:
-      - ./terraform:/app
+      - ./scripts/vault_init.sh:/scripts/vault_init.sh:ro
       - shared-creds:/creds
-    working_dir: /app
+      - ${GCP_SA_KEY_FILE:-/dev/null}:/gcp/sa-key.json:ro
     environment:
       VAULT_ADDR: "http://vault:8200"
       VAULT_TOKEN: "dev-root-token"
-    command: >
-      sh -c "terraform init && terraform apply -auto-approve"
+      VAULT_LICENSE: "${VAULT_LICENSE}"
+      DATA_AGENT_SA_EMAIL: "${DATA_AGENT_SA_EMAIL:-}"
+      COMPUTE_AGENT_SA_EMAIL: "${COMPUTE_AGENT_SA_EMAIL:-}"
+    entrypoint: ["sh", "/scripts/vault_init.sh"]
     networks:
       - mcp-net
 
@@ -65,7 +69,7 @@ services:
     container_name: vault-agent
     restart: always
     depends_on:
-      terraform-setup:
+      vault-init:
         condition: service_completed_successfully
     volumes:
       - ./config/agent.hcl:/etc/vault/agent.hcl:ro

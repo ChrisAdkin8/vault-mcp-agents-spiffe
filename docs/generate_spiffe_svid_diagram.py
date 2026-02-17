@@ -106,13 +106,13 @@ text_centered(W // 2, 20 * S, "SPIFFE SVID Acquisition Flow", font_title, WHITE)
 text_centered(W // 2, 50 * S, "vault-mcp-agents-spiffe  —  How MCP Server workloads obtain X.509 SVIDs", font_subtitle, GREY)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Row 1: Terraform Bootstrap
+# Row 1: vault-init Bootstrap
 # ═══════════════════════════════════════════════════════════════════════════
 
-# ─── Terraform box (top left) ───
+# ─── vault-init box (top left) ───
 tf_x, tf_y = 80 * S, 100 * S
 draw_rounded_rect((tf_x, tf_y, tf_x + 260 * S, tf_y + 60 * S), fill=DARK_PURPLE_BG, outline=PURPLE)
-text_centered(tf_x + 130 * S, tf_y + 8 * S, "terraform-setup", font_heading, PURPLE)
+text_centered(tf_x + 130 * S, tf_y + 8 * S, "vault-init", font_heading, PURPLE)
 text_centered(tf_x + 130 * S, tf_y + 30 * S, "Bootstrap container", font_small, GREY)
 
 # ─── Vault box (top right) ───
@@ -121,7 +121,7 @@ draw_rounded_rect((v_x, v_y, v_x + 350 * S, v_y + 60 * S), fill=DARK_YELLOW_BG, 
 text_centered(v_x + 175 * S, v_y + 8 * S, "Vault Enterprise", font_heading, YELLOW)
 text_centered(v_x + 175 * S, v_y + 30 * S, "PKI engine + AppRole auth", font_small, GREY)
 
-# Step 1: Terraform -> Vault (configure PKI + AppRole)
+# Step 1: vault-init -> Vault (configure PKI + AppRole)
 draw_arrow(tf_x + 260 * S, tf_y + 30 * S, v_x, v_y + 30 * S, color=PURPLE)
 draw_circle_number(tf_x + 290 * S, tf_y + 8 * S, 1)
 draw.text((tf_x + 308 * S, tf_y + 1 * S), "Configure PKI engine,", font=font_small, fill=GREEN)
@@ -133,7 +133,7 @@ draw_dashed_rect((sc_x, sc_y, sc_x + 220 * S, sc_y + 55 * S), outline=DASHED_BOR
 draw.text((sc_x + 10 * S, sc_y + 5 * S), "shared-creds volume", fill=YELLOW, font=font_heading)
 draw.text((sc_x + 10 * S, sc_y + 26 * S), "role_id  +  secret_id", fill=GREY, font=font_small)
 
-# Step 2: Terraform -> shared-creds (write AppRole creds)
+# Step 2: vault-init -> shared-creds (write AppRole creds)
 draw_arrow(tf_x + 130 * S, tf_y + 60 * S, sc_x + 110 * S, sc_y, color=PURPLE)
 draw_circle_number(tf_x + 60 * S, tf_y + 72 * S, 2)
 draw.text((tf_x + 78 * S, tf_y + 65 * S), "Write AppRole creds", font=font_small, fill=GREEN)

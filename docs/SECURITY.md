@@ -123,7 +123,7 @@ The 5-minute ceiling is enforced at two independent layers:
 
 | Layer | Configuration | Enforcement point |
 |-------|--------------|-------------------|
-| **Vault GCP impersonated account** | `ttl = "300"` in Terraform | Server-side — Vault passes this as the `lifetime` to GCP's `generateAccessToken` API |
+| **Vault GCP impersonated account** | `ttl = "300"` in `vault_init.sh` | Server-side — Vault passes this as the `lifetime` to GCP's `generateAccessToken` API |
 | **Application policy** | `max_gcp_token_ttl: "5m"` in `capabilities.yaml` | Client-side — `BaseMCPServer._get_gcp_token()` computes `effective_ttl = min(vault_ttl, policy_max)` |
 
 Even if one layer is misconfigured, the other still caps credential lifetime.
@@ -174,7 +174,7 @@ For production deployments beyond the proof-of-concept:
 
 1. **mTLS is enabled by default** — Vault Agent renders X.509 SVIDs that MCP servers use for mutual TLS.
 2. **Use network policies** to restrict MCP server access to authorised agent containers only.
-3. **Use a remote Terraform backend** with encryption for state files containing GCP service account keys.
+3. **Use a remote Terraform backend** with encryption for state files containing GCP service account keys (if using Terraform for GCP provisioning).
 4. **Rotate Vault root token** — the dev-mode root token is for development only.
 5. **Configure Vault audit logging** in addition to application-level audit logging.
 6. **Rotate SVIDs** — configure Vault Agent template `max_stale` and PKI role TTLs for regular certificate rotation.

@@ -1,20 +1,16 @@
-# Terraform — GCP + Vault Configuration
+# Terraform — GCP Resource Provisioning
 
-This Terraform configuration creates GCP service accounts for Vault and its agents, configures the Vault GCP secrets engine with two impersonated accounts that issue 5-minute OAuth2 tokens, provisions a PKI engine for SPIFFE X.509 SVIDs, and sets up AppRole and Kubernetes auth backends. No service-account key file is written to disk — the key material flows directly from GCP into Vault via Terraform state.
+This Terraform configuration creates the GCP service accounts and IAM bindings required by the Vault GCP secrets engine. It does **not** configure Vault itself — that is handled automatically by the `vault-init` container in `docker-compose.yaml` (see [`scripts/vault_init.sh`](../scripts/vault_init.sh)).
 
 ## File layout
 
 | File | Purpose |
 |---|---|
-| `main.tf` | Provider configuration (Google + Vault + Local) |
+| `main.tf` | Provider configuration (Google) |
 | `gcp.tf` | All GCP resources: service accounts (Vault + agents), IAM bindings, SA keys, impersonation grants |
-| `vault_gcp_secrets.tf` | Vault GCP secrets engine and impersonated accounts with 5-minute token TTL |
-| `vault_pki.tf` | PKI engine for SPIFFE SVIDs: root CA, issuing URLs, SPIFFE-compliant certificate role |
-| `vault_auth.tf` | Vault policy, AppRole auth (Docker Compose), Kubernetes auth (K8s migration) |
-| `creds_export.tf` | Writes AppRole `role_id` and `secret_id` to `/creds/` for the Vault Agent sidecar |
-| `variables.tf` | Input variables (project ID, region, Vault address, etc.) |
-| `outputs.tf` | GCP outputs: SA email, GCP secrets mount path |
-| `versions.tf` | Provider version constraints (Google, Vault, Local) |
+| `variables.tf` | Input variables (project ID, region) |
+| `outputs.tf` | GCP outputs: SA emails, SA key (base64) |
+| `versions.tf` | Provider version constraints (Google) |
 
 ## Prerequisites
 
@@ -27,8 +23,6 @@ This Terraform configuration creates GCP service accounts for Vault and its agen
   - `roles/iam.serviceAccountAdmin` (create service accounts)
   - `roles/iam.serviceAccountKeyAdmin` (create SA keys)
   - `roles/resourcemanager.projectIamAdmin` (grant IAM bindings)
-- Vault dev server running (`docker compose up -d` from the project root)
-- `scripts/setup_vault.sh` already executed (creates userpass auth, policies, test users)
 
 ## Quick start
 
@@ -53,56 +47,36 @@ terraform apply
 | IAM bindings on Vault SA | `serviceAccountAdmin`, `serviceAccountKeyAdmin`, `serviceAccountTokenCreator`, `projectIamAdmin` |
 | IAM binding: `serviceAccountTokenCreator` on agent SAs | Allows Vault's SA to generate OAuth2 tokens for agent SAs |
 
-### Vault GCP secrets (`vault_gcp_secrets.tf`)
+## Extracting the SA key for Docker Compose
 
-| Resource | Purpose |
-|---|---|
-| Vault GCP secrets backend (`gcp/`) | Enables and configures the secrets engine |
-| Vault impersonated account `data-agent-gcp` | 5-minute OAuth2 tokens for data agent operations |
-| Vault impersonated account `compute-agent-gcp` | 5-minute OAuth2 tokens for compute agent operations |
+After `terraform apply`, extract the service account key and save it to a file:
 
-### Vault PKI (`vault_pki.tf`)
+```bash
+terraform output -raw vault_sa_key_base64 | base64 -d > sa-key.json
+```
 
-| Resource | Purpose |
-|---|---|
-| PKI secrets engine (`pki/`) | Mount for issuing SPIFFE X.509 SVIDs |
-| Internal root CA (`MCP Root CA`) | 10-year self-signed root certificate |
-| PKI role `mcp-server` | SPIFFE-compliant role allowing `spiffe://my-trust-domain/ns/*/sa/*` URI SANs |
+Then configure `docker/.env`:
 
-### Vault auth and policy (`vault_auth.tf`)
+```
+GCP_SA_KEY_FILE=./sa-key.json
+DATA_AGENT_SA_EMAIL=data-agent-gcp@YOUR_PROJECT.iam.gserviceaccount.com
+COMPUTE_AGENT_SA_EMAIL=compute-agent-gcp@YOUR_PROJECT.iam.gserviceaccount.com
+```
 
-| Resource | Purpose |
-|---|---|
-| `mcp-policy` | Vault policy granting `pki/issue/mcp-server` access |
-| AppRole auth backend + `mcp-role` | Docker Compose workload authentication for Vault Agent |
-| Kubernetes auth backend + `mcp-server` role | Pre-configured for Kubernetes migration (see below) |
+You can get the exact email addresses from Terraform outputs:
 
-### Credential export (`creds_export.tf`)
+```bash
+terraform output data_agent_service_account_email
+terraform output compute_agent_service_account_email
+```
 
-| Resource | Purpose |
-|---|---|
-| `/creds/role_id` | AppRole role ID written to shared Docker volume |
-| `/creds/secret_id` | AppRole secret ID written to shared Docker volume |
-
-These files are consumed by the Vault Agent sidecar at startup. The agent reads them, authenticates to Vault via AppRole, and uses the resulting token to render X.509 SVIDs from the PKI engine.
-
-## Kubernetes auth backend
-
-The Kubernetes auth backend and `mcp-server` role are pre-configured for the migration from Docker Compose to Kubernetes. The Docker Compose stack uses AppRole auth (credentials written to a shared volume by Terraform), but the same Vault PKI role and policy work with both auth methods.
-
-When deploying to Kubernetes:
-- Pods authenticate using their service account token instead of AppRole credentials
-- The Vault Agent Injector admission controller replaces the manual `vault-agent` sidecar — it injects the same agent automatically based on pod annotations
-- The `mcp-server` K8s role is bound to service account `mcp-sa` in the `default` namespace (update these for your cluster)
-- No changes to the PKI configuration, policy, or MCP server code are needed
-
-This pre-configuration means the Terraform state is ready for Kubernetes from day one — only the auth method changes, not the certificate infrastructure.
+The `vault-init` container in Docker Compose will use these to configure the Vault GCP secrets engine with 5-minute credential TTLs automatically.
 
 ## Important notes
 
-- **IAM propagation delay:** After `terraform apply`, wait 1–2 minutes before requesting GCP tokens through Vault. GCP IAM bindings can take up to 60 seconds to propagate.
-- **State contains secrets:** `terraform.tfstate` holds the GCP service account key and AppRole secret ID. For production, use a [remote backend](https://developer.hashicorp.com/terraform/language/settings/backends/configuration) with encryption (e.g., GCS with CMEK).
-- **Teardown:** `terraform destroy` deletes the GCP service account, Vault mounts, and invalidates any active Vault leases.
+- **IAM propagation delay:** After `terraform apply`, wait 1-2 minutes before requesting GCP tokens through Vault. GCP IAM bindings can take up to 60 seconds to propagate.
+- **State contains secrets:** `terraform.tfstate` holds the GCP service account key. For production, use a [remote backend](https://developer.hashicorp.com/terraform/language/settings/backends/configuration) with encryption (e.g., GCS with CMEK).
+- **Teardown:** `terraform destroy` deletes the GCP service accounts and invalidates any active credentials.
 
 ## Variables
 
@@ -110,7 +84,13 @@ This pre-configuration means the Terraform state is ready for Kubernetes from da
 |---|---|---|
 | `gcp_project_id` | *(required)* | GCP project ID |
 | `gcp_region` | `us-central1` | Default GCP region |
-| `vault_address` | `http://127.0.0.1:8200` | Vault server address |
-| `vault_token` | `dev-root-token` | Vault token (sensitive) |
-| `vault_gcp_secrets_mount` | `gcp` | Vault GCP secrets mount path |
-| `vault_service_account_id` | `vault-gcp-secrets` | GCP service account ID |
+| `vault_service_account_id` | `vault-gcp-secrets` | GCP service account ID for Vault |
+
+## Outputs
+
+| Output | Description |
+|---|---|
+| `vault_service_account_email` | Email of Vault's GCP service account |
+| `data_agent_service_account_email` | Email of the data agent GCP service account |
+| `compute_agent_service_account_email` | Email of the compute agent GCP service account |
+| `vault_sa_key_base64` | Base64-encoded SA key (sensitive) — decode and save to a file for Docker Compose |

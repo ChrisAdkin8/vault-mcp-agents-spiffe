@@ -31,8 +31,30 @@ The 5-minute ceiling is enforced at two independent layers, so both must agree b
 
 | Layer | Configuration | What it controls |
 |---|---|---|
-| **Vault GCP impersonated account** | `ttl = "300"` on each `vault_gcp_secret_impersonated_account` in Terraform | Server-side ceiling — Vault passes this as the `lifetime` to GCP's `generateAccessToken` API, so the token genuinely expires after 5 minutes |
+| **Vault GCP impersonated account** | `ttl = "300"` on each impersonated account in `vault_init.sh` | Server-side ceiling — Vault passes this as the `lifetime` to GCP's `generateAccessToken` API, so the token genuinely expires after 5 minutes |
 | **Application policy** | `max_gcp_token_ttl: "5m"` in `policies/capabilities.yaml` | Client-side guard — the application policy declares the intended maximum TTL for audit and defence-in-depth |
+
+## Why SPIFFE Verifiable Identity Documents for MCP Server Identity?
+
+Short-lived GCP credentials solve the *credential theft* problem, but they do not solve the *workload impersonation* problem. Even with 5-minute tokens, a compromised container on the same Docker bridge network can intercept the human's Vault token from plaintext HTTP traffic and replay it to Vault as if it were the legitimate MCP server. Vault has no way to distinguish the attacker from the real workload because neither presents a cryptographic identity.
+
+<p align="center">
+  <img src="docs/credential-exposure-without-spiffe.png" alt="Credential exposure without SPIFFE: a compromised container replays stolen tokens to Vault" width="780">
+</p>
+
+SPIFFE Verifiable Identity Documents (SVIDs) close this gap. Each MCP server receives a short-lived X.509 certificate from Vault's PKI engine, with a SPIFFE URI SAN (`spiffe://my-trust-domain/ns/default/sa/mcp`) embedded in the Subject Alternative Name field. This certificate serves three purposes:
+
+1. **Mutual TLS (mTLS)** — all traffic between the agent CLI and MCP servers is encrypted and mutually authenticated. An attacker sniffing the Docker bridge sees only ciphertext.
+2. **Cryptographic workload identity** — a rogue container cannot obtain a valid SVID because it does not have AppRole credentials to authenticate to Vault. Without a valid certificate, mTLS rejects the connection outright.
+3. **Policy-bound identity** — the SPIFFE ID in the certificate maps to a scoped tool allowlist in `policies/capabilities.yaml`, so even if an attacker could somehow obtain an SVID, it would only grant access to the tools permitted for that specific workload.
+
+The diagram below contrasts the two scenarios. Without SPIFFE, an attacker can impersonate an MCP server indefinitely. With SPIFFE, the attacker never gains access — mTLS blocks unauthenticated connections, SVIDs auto-rotate every hour, and stolen certificates expire before they can be exploited.
+
+<p align="center">
+  <img src="docs/why-spiffe-timeline.png" alt="Without SPIFFE vs with SPIFFE: impersonation timeline comparison" width="780">
+</p>
+
+The SVID lifecycle is fully automated by the Vault Agent sidecar — no manual certificate management is required. See the [SPIFFE Guide](docs/SPIFFE_GUIDE.md) for implementation details.
 
 ## What this project demonstrates
 
@@ -112,13 +134,11 @@ gcp:
 > tokens do not carry project metadata, so the GCP client libraries cannot
 > infer the project automatically.
 
-### 3. Configure GCP secrets engine (Terraform)
+### 3. Configure GCP secrets engine
 
-The GCP secrets engine is provisioned via Terraform, which creates a GCP service account, grants it the necessary IAM roles, and configures Vault — with no service-account key file on disk.
+The GCP secrets engine requires pre-provisioned GCP service accounts. Use Terraform to create them, then provide the service account key to Docker Compose.
 
-**Prerequisites:**
-- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.5
-- `gcloud` CLI authenticated: `gcloud auth application-default login`
+**Step 1 — Provision GCP resources (one-time):**
 
 ```bash
 cd terraform
@@ -130,11 +150,28 @@ terraform apply
 
 This creates:
 - A GCP service account for Vault itself (`vault-gcp-secrets@<project>.iam.gserviceaccount.com`)
-- IAM bindings for `serviceAccountAdmin`, `serviceAccountKeyAdmin`, `serviceAccountTokenCreator`, and `projectIamAdmin`
 - Dedicated GCP service accounts for each agent (`data-agent-gcp`, `compute-agent-gcp`) with their respective IAM roles
-- Vault GCP secrets engine with two **impersonated accounts** (`data-agent-gcp` and `compute-agent-gcp`), each configured with a **5-minute token TTL** (`ttl = "300"`)
+- IAM bindings allowing Vault to impersonate the agent service accounts
 
-To tear down: `terraform destroy`. See [`terraform/README.md`](terraform/README.md) for full details.
+**Step 2 — Extract the SA key and configure Docker Compose:**
+
+```bash
+terraform output -raw vault_sa_key_base64 | base64 -d > sa-key.json
+```
+
+Add the following to `docker/.env`:
+
+```
+GCP_SA_KEY_FILE=./sa-key.json
+DATA_AGENT_SA_EMAIL=data-agent-gcp@YOUR_PROJECT.iam.gserviceaccount.com
+COMPUTE_AGENT_SA_EMAIL=compute-agent-gcp@YOUR_PROJECT.iam.gserviceaccount.com
+```
+
+The `vault-init` container will automatically configure the Vault GCP secrets engine with two **impersonated accounts** (`data-agent-gcp` and `compute-agent-gcp`), each with a **5-minute token TTL** (`ttl = "300"`).
+
+If GCP variables are not set, the stack starts without the GCP secrets engine — PKI, AppRole, and SPIFFE functionality still work.
+
+To tear down GCP resources: `terraform destroy`. See [`terraform/README.md`](terraform/README.md) for full details.
 
 ### 4. Start the stack
 
@@ -144,7 +181,7 @@ docker compose --env-file docker/.env up -d --build
 
 This brings up:
 - **Vault Enterprise** — listening on `http://localhost:8200`
-- **terraform-setup** — a one-shot container that configures Vault (PKI, AppRole, policies) and writes AppRole credentials to a shared volume
+- **vault-init** — a one-shot container that configures Vault (PKI, AppRole, GCP secrets engine, policies, test users) and writes AppRole credentials to a shared volume
 - **vault-agent** — a sidecar that authenticates via AppRole and renders X.509 SVIDs to a certificate volume
 - **data-mcp-server** — GCS + BigQuery MCP server on port 8001 (with mTLS)
 - **compute-mcp-server** — GCE Compute MCP server on port 8002 (with mTLS)
@@ -158,7 +195,7 @@ docker compose --env-file docker/.env exec agent-cli vault-mcp-agents
 
 You will be prompted to log in, select an agent, and then interact with it in natural language.
 
-The `vault-init` container automatically creates three preconfigured users with different access levels:
+The `vault-init` container automatically creates three test users with different access levels:
 
 | Username | Password | Role | Access Level |
 |---|---|---|---|
@@ -311,20 +348,17 @@ vault-mcp-agents/
 ├── policies/
 │   └── capabilities.yaml             # (role, agent) → allowed tools + SPIFFE identity map
 ├── scripts/
-│   ├── setup_vault.sh                # Vault dev provisioning (auth, policies, users)
+│   ├── vault_init.sh                 # Comprehensive Vault setup (PKI, AppRole, GCP, users)
+│   ├── setup_vault.sh                # Lightweight local dev provisioning (auth, policies, users)
 │   └── run_integration_tests.sh      # End-to-end integration test runner
 ├── terraform/
-│   ├── main.tf                       # Provider configuration (Google + Vault + Local)
+│   ├── main.tf                       # Provider configuration (Google)
 │   ├── gcp.tf                        # GCP service accounts, IAM bindings, SA keys
-│   ├── vault_gcp_secrets.tf          # Vault GCP secrets engine + impersonated accounts
-│   ├── vault_pki.tf                  # PKI engine, root CA, SPIFFE-compliant role
-│   ├── vault_auth.tf                 # Vault policy, AppRole + Kubernetes auth backends
-│   ├── creds_export.tf               # Writes AppRole creds to shared volume for Vault Agent
-│   ├── variables.tf                  # Input variables (project ID, region, etc.)
-│   ├── outputs.tf                    # GCP outputs (SA email, mount path)
+│   ├── variables.tf                  # Input variables (project ID, region)
+│   ├── outputs.tf                    # GCP outputs (SA emails, SA key)
 │   ├── versions.tf                   # Provider version constraints
 │   ├── terraform.tfvars.example      # Template for local variable values
-│   └── README.md                     # Terraform-specific usage guide
+│   └── README.md                     # GCP resource provisioning guide
 ├── docker/
 │   ├── agent.Dockerfile              # Multi-stage build for the agent CLI container
 │   ├── mcp-server.Dockerfile         # Multi-stage build for MCP server containers
@@ -397,7 +431,7 @@ vault-mcp-agents/
 | [docs/TESTING.md](docs/TESTING.md) | Testing strategy, fixtures, and how to run tests |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Development setup, conventions, and contribution guide |
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | Module-level API reference for all public classes |
-| [terraform/README.md](terraform/README.md) | GCP infrastructure provisioning with Terraform |
+| [terraform/README.md](terraform/README.md) | GCP resource provisioning with Terraform |
 
 ## Customisation
 

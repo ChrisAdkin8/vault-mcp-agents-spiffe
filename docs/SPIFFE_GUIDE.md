@@ -44,7 +44,7 @@ Instead of requiring a separate SPIRE infrastructure, this project uses **Vault 
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌──────────────┐     ┌──────────────┐
-│    Vault     │────>│ Terraform setup  │────>│ Vault Agent  │────>│ MCP Servers  │
+│    Vault     │────>│   vault-init     │────>│ Vault Agent  │────>│ MCP Servers  │
 │  (healthy)   │     │ (PKI + AppRole)  │     │ (sidecar)    │     │ (mTLS)       │
 └─────────────┘     └──────────────────┘     └──────────────┘     └──────────────┘
                      Writes role_id &          Reads creds,         Mounts cert
@@ -52,12 +52,18 @@ Instead of requiring a separate SPIRE infrastructure, this project uses **Vault 
                      shared volume             renders SVIDs        with mTLS
 ```
 
+The full flow is shown in the diagram below:
+
+<p align="center">
+  <img src="spiffe-svid-acquisition.png" alt="SPIFFE SVID acquisition flow: vault-init to Vault Agent to MCP servers" width="780">
+</p>
+
 1. **Vault** starts in dev mode and becomes healthy
-2. **Terraform** waits for Vault, then:
+2. **vault-init** waits for Vault, then:
    - Configures the PKI secrets engine (root CA, SPIFFE-compliant role)
    - Configures AppRole auth with a policy allowing `pki/issue/mcp-server`
    - Writes the AppRole `role_id` and `secret_id` to a shared Docker volume (`/creds/`)
-3. **Vault Agent** starts after Terraform completes, then:
+3. **Vault Agent** starts after vault-init completes, then:
    - Reads AppRole credentials from the shared volume
    - Authenticates to Vault via AppRole
    - Uses template blocks to request certificates from `pki/issue/mcp-server`
@@ -66,7 +72,13 @@ Instead of requiring a separate SPIRE infrastructure, this project uses **Vault 
 
 ### No static secrets
 
-The AppRole credentials are generated fresh by Terraform on each `docker compose up`. The Vault Agent reads them once to bootstrap authentication, then uses its Vault token to continuously render certificates. No secrets are baked into container images.
+Every Vault-based authentication system faces the **Secret Zero** problem: a workload must present a credential to Vault, but where does that first credential come from?
+
+<p align="center">
+  <img src="secret-zero-problem.png" alt="The Secret Zero problem: every approach requires a static, long-lived secret" width="780">
+</p>
+
+This project solves Secret Zero by having the `vault-init` container generate fresh AppRole credentials on each `docker compose up` and write them to a shared Docker volume. The Vault Agent reads them once to bootstrap authentication, then uses its Vault token to continuously render certificates. No secrets are baked into container images, and the AppRole `secret_id` is single-use — it cannot be replayed.
 
 ## Why the Vault Agent sidecar pattern?
 
@@ -90,17 +102,17 @@ The Docker Compose stack in this project manually configures what Kubernetes aut
 
 | Docker Compose (manual) | Kubernetes (automated) |
 |--------------------------|------------------------|
-| Terraform writes AppRole `role_id` / `secret_id` to a shared Docker volume | The Vault Agent Injector admission controller injects credentials automatically |
+| `vault-init` writes AppRole `role_id` / `secret_id` to a shared Docker volume | The Vault Agent Injector admission controller injects credentials automatically |
 | `vault-agent` service defined explicitly in `docker-compose.yaml` | Annotation `vault.hashicorp.com/agent-inject: "true"` causes the admission controller to inject the sidecar |
 | Certificate volume mounts configured per-service | The injector handles volume mounts and init/sidecar container injection |
 | Startup ordering via `depends_on` | Kubernetes handles pod scheduling and container ordering |
-| AppRole auth method | Kubernetes auth method (already pre-configured in `terraform/vault_auth.tf`) |
+| AppRole auth method | Kubernetes auth method (pod service account token) |
 
 By using the same sidecar pattern in Docker Compose, the architecture translates directly to Kubernetes without changing the MCP server code or the certificate consumption model. The MCP servers always read certificates from `/etc/mcp/certs/` regardless of whether a manually configured Vault Agent or an injector-managed sidecar put them there.
 
-### The Kubernetes auth method is pre-configured
+### Migrating to Kubernetes auth
 
-The Terraform configuration already includes a Kubernetes auth backend (`terraform/vault_auth.tf`) with a role binding for service account `mcp-sa` in the `default` namespace. When migrating to Kubernetes:
+When migrating to Kubernetes, configure the Kubernetes auth backend in Vault with a role binding for the MCP server service account. Then:
 
 1. Deploy the Vault Agent Injector into the cluster
 2. Annotate MCP server pods with `vault.hashicorp.com/agent-inject` annotations
@@ -127,7 +139,7 @@ spiffe_identity_map:
 
 ### Root CA
 
-Terraform creates an internal root CA (`MCP Root CA`) with a 10-year TTL and 4096-bit RSA key. This is the trust anchor for all SVIDs.
+The `vault-init` container creates an internal root CA (`MCP Root CA`) with a 10-year TTL and 4096-bit RSA key. This is the trust anchor for all SVIDs.
 
 ### PKI role
 
@@ -218,7 +230,7 @@ URI:spiffe://my-trust-domain/ns/default/sa/mcp
 The Vault Agent may not have started or authenticated yet:
 
 1. Check Vault Agent logs: `docker compose logs vault-agent`
-2. Verify Terraform completed: `docker compose logs terraform-setup`
+2. Verify vault-init completed: `docker compose logs vault-init`
 3. Check that AppRole credentials exist: look for `role_id` and `secret_id` in the `shared-creds` volume
 
 ### "Permission denied" from Vault Agent

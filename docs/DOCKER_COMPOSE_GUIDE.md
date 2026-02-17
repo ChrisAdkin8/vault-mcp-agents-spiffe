@@ -1,6 +1,6 @@
 # Docker Compose Guide
 
-This guide explains how to run the full containerised stack: Vault Enterprise, Terraform bootstrap, Vault Agent sidecar, MCP servers, and the agent CLI.
+This guide explains how to run the full containerised stack: Vault Enterprise, vault-init bootstrap, Vault Agent sidecar, MCP servers, and the agent CLI.
 
 ## Prerequisites
 
@@ -33,7 +33,19 @@ VAULT_LICENSE=<your-vault-enterprise-license-key>
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-### 2. Start the stack
+### 2. (Optional) Configure GCP secrets engine
+
+To enable Vault-brokered GCP credentials with 5-minute TTLs, first provision the GCP service accounts using Terraform (see [`terraform/README.md`](../terraform/README.md)), then add these to `docker/.env`:
+
+```
+GCP_SA_KEY_FILE=./path/to/sa-key.json
+DATA_AGENT_SA_EMAIL=data-agent-gcp@YOUR_PROJECT.iam.gserviceaccount.com
+COMPUTE_AGENT_SA_EMAIL=compute-agent-gcp@YOUR_PROJECT.iam.gserviceaccount.com
+```
+
+If these variables are not set, the stack starts without the GCP secrets engine — PKI, AppRole, and SPIFFE functionality still work.
+
+### 3. Start the stack
 
 ```bash
 docker compose --env-file docker/.env up -d --build
@@ -44,21 +56,21 @@ This starts six services:
 | Service | Description | Port |
 |---------|-------------|------|
 | `vault` | Vault Enterprise 1.21 in dev mode | 8200 |
-| `terraform-setup` | One-shot: configures Vault (PKI, AppRole, policies), writes creds to shared volume, then exits | — |
+| `vault-init` | One-shot: configures Vault (PKI, AppRole, GCP secrets, policies, users), writes creds to shared volume, then exits | — |
 | `vault-agent` | Sidecar: authenticates via AppRole, renders X.509 SVIDs to cert volume | — |
 | `data-mcp-server` | Data MCP server (GCS + BigQuery tools) with mTLS | 8001 |
 | `compute-mcp-server` | Compute MCP server (GCE tools) with mTLS | 8002 |
 | `agent-cli` | Interactive LangChain agent CLI | — |
 
-### 3. Wait for services to be healthy
+### 4. Wait for services to be healthy
 
 ```bash
 docker compose --env-file docker/.env ps
 ```
 
-All services should show `healthy` (except `terraform-setup` which exits after completion, `vault-agent` which runs continuously, and `agent-cli` which waits for input).
+All services should show `healthy` (except `vault-init` which exits after completion, `vault-agent` which runs continuously, and `agent-cli` which waits for input).
 
-### 4. Verify SVIDs (optional)
+### 5. Verify SVIDs (optional)
 
 ```bash
 # Check certificate files exist
@@ -71,7 +83,7 @@ docker exec data-mcp-server openssl x509 \
 
 Expected: `URI:spiffe://my-trust-domain/ns/default/sa/mcp`
 
-### 5. Run the agent
+### 6. Run the agent
 
 ```bash
 docker compose --env-file docker/.env exec agent-cli vault-mcp-agents
@@ -79,7 +91,7 @@ docker compose --env-file docker/.env exec agent-cli vault-mcp-agents
 
 You will be prompted to log in with one of the test users (alice/bob/carol), select an agent, and interact with it.
 
-### 6. Tear down
+### 7. Tear down
 
 ```bash
 docker compose --env-file docker/.env down
@@ -103,10 +115,9 @@ docker compose --env-file docker/.env down -v
                ┌────────────────┼────────────────┐
                │                │                │
        ┌───────▼──────┐ ┌──────▼───────┐ ┌──────▼──────┐
-       │  terraform-  │ │ vault-agent  │ │  agent-cli  │
-       │  setup       │ │ (sidecar)    │ │  (tty)      │
-       │  (one-shot)  │ │              │ └──────┬──────┘
-       └──────┬───────┘ └──────┬───────┘        │
+       │  vault-init  │ │ vault-agent  │ │  agent-cli  │
+       │  (one-shot)  │ │ (sidecar)    │ │  (tty)      │
+       └──────┬───────┘ └──────┬───────┘ └──────┬──────┘
               │                │                │
      writes role_id/    renders SVIDs    ┌──────┴──────┐
      secret_id to       to cert volume   │             │
@@ -128,8 +139,8 @@ docker compose --env-file docker/.env down -v
 ### Startup order
 
 1. `vault` starts and becomes healthy (health check: `vault status`)
-2. `terraform-setup` waits for Vault, runs `terraform init && terraform apply`, configures PKI + AppRole + policies, writes AppRole credentials to `shared-creds` volume, then exits
-3. `vault-agent` starts after Terraform exits successfully, reads AppRole credentials, authenticates, renders SVIDs to `certs-vol`
+2. `vault-init` waits for Vault, runs vault CLI commands to configure PKI + AppRole + GCP secrets engine + policies + test users, writes AppRole credentials to `shared-creds` volume, then exits
+3. `vault-agent` starts after `vault-init` exits successfully, reads AppRole credentials, authenticates, renders SVIDs to `certs-vol`
 4. `data-mcp-server` and `compute-mcp-server` start after `vault-agent` (mount `certs-vol` for mTLS)
 5. `agent-cli` starts after both MCP servers are healthy
 
@@ -138,7 +149,7 @@ docker compose --env-file docker/.env down -v
 | Volume | Purpose | Used by |
 |--------|---------|---------|
 | `vault-data` | Vault persistent data | `vault` |
-| `shared-creds` | AppRole role_id and secret_id files | `terraform-setup` (write), `vault-agent` (read) |
+| `shared-creds` | AppRole role_id and secret_id files | `vault-init` (write), `vault-agent` (read) |
 | `certs-vol` | Rendered X.509 SVIDs (server.crt, server.key, ca.crt) | `vault-agent` (write), MCP servers + agent-cli (read) |
 
 ## Environment variables
@@ -150,7 +161,15 @@ docker compose --env-file docker/.env down -v
 | `VAULT_LICENSE` | Vault Enterprise license key |
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude models |
 
-### Optional (in `docker/.env`)
+### Optional — GCP secrets engine (in `docker/.env`)
+
+| Variable | Description |
+|----------|-------------|
+| `GCP_SA_KEY_FILE` | Path to the GCP service account key JSON file on the host. If not set, the GCP secrets engine is skipped. |
+| `DATA_AGENT_SA_EMAIL` | Email of the pre-provisioned data agent GCP service account |
+| `COMPUTE_AGENT_SA_EMAIL` | Email of the pre-provisioned compute agent GCP service account |
+
+### Optional — other (in `docker/.env`)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -163,7 +182,7 @@ These are set in the `docker-compose.yaml` and should not normally be overridden
 | Variable | Service | Value |
 |----------|---------|-------|
 | `VAULT_DEV_ROOT_TOKEN_ID` | vault | `dev-root-token` |
-| `VAULT_ADDR` / `VAULT_TOKEN` | terraform-setup | `http://vault:8200` / `dev-root-token` |
+| `VAULT_ADDR` / `VAULT_TOKEN` | vault-init | `http://vault:8200` / `dev-root-token` |
 | `MCP_TRANSPORT` | MCP servers | `http` |
 | `MCP_PORT` | data-mcp-server | `8001` |
 | `MCP_PORT` | compute-mcp-server | `8002` |
@@ -196,11 +215,11 @@ The Docker Compose stack is designed as a stepping stone toward Kubernetes deplo
 
 | Docker Compose (this stack) | Kubernetes equivalent |
 |-------------------------------|----------------------|
-| Terraform writes AppRole creds to `shared-creds` volume | Vault Agent Injector admission controller injects credentials automatically |
+| `vault-init` writes AppRole creds to `shared-creds` volume | Vault Agent Injector admission controller injects credentials automatically |
 | `vault-agent` service in `docker-compose.yaml` | `vault.hashicorp.com/agent-inject: "true"` pod annotation triggers automatic sidecar injection |
 | `certs-vol` shared volume | Injected shared volume managed by the sidecar |
 | `depends_on` for startup ordering | Kubernetes init containers and readiness probes |
-| AppRole auth | Kubernetes auth (pod service account token — already pre-configured in `terraform/vault_auth.tf`) |
+| AppRole auth | Kubernetes auth (pod service account token) |
 
 The MCP servers are agnostic to how certificates arrive at `/etc/mcp/certs/`. Whether a manually configured Vault Agent or a Kubernetes-injected sidecar renders the SVIDs, the application code is identical.
 
@@ -208,7 +227,7 @@ To migrate:
 
 1. Deploy the [Vault Agent Injector](https://developer.hashicorp.com/vault/docs/platform/k8s/injector) into the cluster
 2. Annotate MCP server pod specs with Vault Agent injection annotations
-3. Switch from AppRole auth to Kubernetes auth (the Terraform configuration already includes the K8s auth backend and `mcp-server` role)
+3. Switch from AppRole auth to Kubernetes auth
 4. The same PKI role, policy, and certificate paths work unchanged
 
 ## Local development (Vault OSS)
@@ -237,8 +256,8 @@ docker compose --env-file docker/.env logs -f
 # Specific service
 docker compose --env-file docker/.env logs -f data-mcp-server
 
-# Terraform bootstrap output (useful for debugging configuration)
-docker compose --env-file docker/.env logs terraform-setup
+# Vault init output (useful for debugging configuration)
+docker compose --env-file docker/.env logs vault-init
 
 # Vault Agent output (useful for debugging certificate rendering)
 docker compose --env-file docker/.env logs vault-agent
@@ -299,17 +318,18 @@ docker compose --env-file docker/.env logs vault
 grep VAULT_LICENSE docker/.env
 ```
 
-### Terraform fails
+### vault-init fails
 
-**Symptom:** `terraform-setup` exits with a non-zero code.
+**Symptom:** `vault-init` exits with a non-zero code and downstream services do not start.
 
 **Common causes:**
 - Vault not healthy yet (should be handled by `depends_on`)
-- Stale Terraform state from a previous run
+- Invalid GCP SA key file path or format
+- Missing `DATA_AGENT_SA_EMAIL` / `COMPUTE_AGENT_SA_EMAIL` when `GCP_SA_KEY_FILE` is set
 
 **Fix:**
 ```bash
-docker compose --env-file docker/.env logs terraform-setup
+docker compose --env-file docker/.env logs vault-init
 
 # If state is stale, clear volumes and restart
 docker compose --env-file docker/.env down -v
@@ -321,13 +341,13 @@ docker compose --env-file docker/.env up -d --build
 **Symptom:** `/etc/mcp/certs/` is empty in MCP server containers.
 
 **Common causes:**
-- Terraform did not write AppRole credentials
+- vault-init did not write AppRole credentials
 - AppRole policy misconfigured
 
 **Fix:**
 ```bash
 docker compose --env-file docker/.env logs vault-agent
-docker compose --env-file docker/.env logs terraform-setup
+docker compose --env-file docker/.env logs vault-init
 ```
 
 ### MCP servers fail health check

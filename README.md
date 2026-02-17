@@ -56,6 +56,7 @@ The diagram below contrasts the two scenarios. Without SPIFFE, an attacker can i
 
 The SVID lifecycle is fully automated by the Vault Agent sidecar — no manual certificate management is required. See the [SPIFFE Guide](docs/SPIFFE_GUIDE.md) for implementation details.
 
+
 ## What this project demonstrates
 
 | Concern | How it's handled |

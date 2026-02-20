@@ -1,22 +1,11 @@
 # Docker Compose Guide
 
-This guide explains how to run the full containerised stack: Vault Enterprise, vault-init bootstrap, Vault Agent sidecar, MCP servers, and the agent CLI.
+This guide explains how to run the full containerised stack: Vault, vault-init bootstrap, Vault Agent sidecar, MCP servers, and the agent CLI.
 
 ## Prerequisites
 
 - Docker and Docker Compose v2+
-- A **Vault Enterprise license key**
 - An LLM API key (Anthropic or OpenAI)
-
-### Obtaining a Vault Enterprise license
-
-Options:
-
-1. **HashiCorp Vault Enterprise trial** — request at [hashicorp.com/products/vault/trial](https://www.hashicorp.com/products/vault/trial)
-2. **HCP Vault** — managed Vault with Enterprise features included
-3. **Existing license** — if your organisation has a Vault Enterprise license
-
-The license key is a long string that starts with a product identifier. It is passed to the Vault container via the `VAULT_LICENSE` environment variable.
 
 ## Quick start
 
@@ -29,7 +18,6 @@ cp docker/.env.example docker/.env
 Edit `docker/.env` and fill in:
 
 ```
-VAULT_LICENSE=<your-vault-enterprise-license-key>
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
@@ -55,11 +43,11 @@ This starts six services:
 
 | Service | Description | Port |
 |---------|-------------|------|
-| `vault` | Vault Enterprise 1.21 in dev mode | 8200 |
+| `vault` | Vault 1.21 (OSS) in dev mode | 8200 |
 | `vault-init` | One-shot: configures Vault (PKI, AppRole, GCP secrets, policies, users), writes creds to shared volume, then exits | — |
 | `vault-agent` | Sidecar: authenticates via AppRole, renders X.509 SVIDs to cert volume | — |
-| `data-mcp-server` | Data MCP server (GCS + BigQuery tools) with mTLS | 8001 |
-| `compute-mcp-server` | Compute MCP server (GCE tools) with mTLS | 8002 |
+| `data-mcp-server` | Data MCP server (GCS + BigQuery tools) with mTLS | internal only |
+| `compute-mcp-server` | Compute MCP server (GCE tools) with mTLS | internal only |
 | `agent-cli` | Interactive LangChain agent CLI | — |
 
 ### 4. Wait for services to be healthy
@@ -109,7 +97,7 @@ docker compose --env-file docker/.env down -v
                          ┌──────────────┐
                          │   vault      │
                          │  :8200       │
-                         │  (Enterprise)│
+                         │  (OSS)       │
                          └──────┬───────┘
                                 │
                ┌────────────────┼────────────────┐
@@ -158,7 +146,6 @@ docker compose --env-file docker/.env down -v
 
 | Variable | Description |
 |----------|-------------|
-| `VAULT_LICENSE` | Vault Enterprise license key |
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude models |
 
 ### Optional — GCP secrets engine (in `docker/.env`)
@@ -230,17 +217,17 @@ To migrate:
 3. Switch from AppRole auth to Kubernetes auth
 4. The same PKI role, policy, and certificate paths work unchanged
 
-## Local development (Vault OSS)
+## Local development (stdio transport)
 
-For local development without Vault Enterprise:
+For local development without the full containerised stack:
 
 ```bash
 docker compose -f docker-compose.dev.yaml up -d
 ```
 
-This starts only Vault (OSS, not Enterprise) on port 8200. MCP servers run locally as stdio subprocesses — no containers needed. This preserves the original development workflow.
+This starts only Vault on port 8200. MCP servers run locally as stdio subprocesses — no containers needed. This preserves the original development workflow.
 
-To switch back to the full enterprise stack:
+To switch back to the full stack:
 
 ```bash
 docker compose -f docker-compose.dev.yaml down
@@ -270,15 +257,21 @@ Each service exposes a health check:
 | Service | Health check | Interval |
 |---------|-------------|----------|
 | `vault` | `vault status` | 5s |
-| `data-mcp-server` | `curl -f http://localhost:8001/health` | 10s |
-| `compute-mcp-server` | `curl -f http://localhost:8002/health` | 10s |
+| `data-mcp-server` | `curl --cacert/--cert/--key ... https://localhost:8001/health` (mTLS) | 10s |
+| `compute-mcp-server` | `curl --cacert/--cert/--key ... https://localhost:8002/health` (mTLS) | 10s |
 
-You can also check health endpoints directly:
+You can check the Vault health endpoint directly from the host:
 
 ```bash
 curl http://localhost:8200/v1/sys/health    # Vault
-curl http://localhost:8001/health            # Data MCP server
-curl http://localhost:8002/health            # Compute MCP server
+```
+
+MCP server health endpoints are internal to the Docker network and require mTLS certificates. To check from within a container:
+
+```bash
+docker compose --env-file docker/.env exec data-mcp-server \
+    curl --cacert /etc/mcp/certs/ca.crt --cert /etc/mcp/certs/server.crt \
+         --key /etc/mcp/certs/server.key -f https://localhost:8001/health
 ```
 
 ## Running integration tests
@@ -306,16 +299,12 @@ See the main [README.md](../README.md) for more details on running tests.
 **Symptom:** `vault` container exits immediately or fails health check.
 
 **Common causes:**
-- Missing or invalid `VAULT_LICENSE` in `docker/.env`
 - Port 8200 already in use
 
 **Fix:**
 ```bash
 # Check Vault logs
 docker compose --env-file docker/.env logs vault
-
-# Verify license is set
-grep VAULT_LICENSE docker/.env
 ```
 
 ### vault-init fails

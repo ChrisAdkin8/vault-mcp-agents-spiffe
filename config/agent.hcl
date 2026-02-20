@@ -21,32 +21,18 @@ auto_auth {
   }
 }
 
-# Template to render the SVID (certificate)
+# Single template using pkiCert to issue ONE certificate and write all three
+# files atomically.  This prevents the cert/key mismatch that occurs when
+# three separate template blocks each call pki/issue independently (each call
+# generates a different key pair).
 template {
-  destination = "/etc/mcp/certs/server.crt"
+  destination = "/tmp/vault-agent-cert-render-status"
   contents    = <<EOH
-{{- with secret "pki/issue/mcp-server" "common_name=mcp-server" "uri_sans=spiffe://my-trust-domain/ns/default/sa/mcp" -}}
-{{ .Data.certificate }}
-{{- end }}
-EOH
-}
-
-# Template to render the private key
-template {
-  destination = "/etc/mcp/certs/server.key"
-  contents    = <<EOH
-{{- with secret "pki/issue/mcp-server" "common_name=mcp-server" "uri_sans=spiffe://my-trust-domain/ns/default/sa/mcp" -}}
-{{ .Data.private_key }}
-{{- end }}
-EOH
-}
-
-# Template to render the CA chain
-template {
-  destination = "/etc/mcp/certs/ca.crt"
-  contents    = <<EOH
-{{- with secret "pki/issue/mcp-server" "common_name=mcp-server" "uri_sans=spiffe://my-trust-domain/ns/default/sa/mcp" -}}
-{{ .Data.issuing_ca }}
-{{- end }}
+{{ with pkiCert "pki/issue/mcp-server" "common_name=mcp-server" "uri_sans=spiffe://my-trust-domain/ns/default/sa/mcp" }}
+{{ .Cert | writeToFile "/etc/mcp/certs/server.crt" "" "" "0644" }}
+{{ .Key | writeToFile "/etc/mcp/certs/server.key" "" "" "0600" }}
+{{ .CA | writeToFile "/etc/mcp/certs/ca.crt" "" "" "0644" }}
+{{ .Cert }}
+{{ end }}
 EOH
 }

@@ -7,7 +7,7 @@
 #
 # Prerequisites:
 #   - Docker and Docker Compose installed
-#   - docker/.env file with VAULT_LICENSE set
+#   - docker/.env file configured (see docker/.env.example)
 # ---------------------------------------------------------------------------
 
 set -euo pipefail

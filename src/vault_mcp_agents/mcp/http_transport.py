@@ -115,14 +115,15 @@ def run_http_server(server: BaseMCPServer) -> None:
             "SVID certificates found at %s — starting with mTLS enabled",
             CERT_DIR,
         )
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_context.load_cert_chain(
-            certfile=str(CERT_FILE),
-            keyfile=str(KEY_FILE),
-        )
-        ssl_context.load_verify_locations(cafile=str(CA_FILE))
-        ssl_context.verify_mode = ssl.CERT_REQUIRED
-
+        # Note: SPIFFE URI SAN validation (checking the peer certificate's
+        # spiffe:// URI) is not possible at the uvicorn/ASGI layer — Python's
+        # ssl module and uvicorn do not expose the peer certificate to
+        # application code.  However, since the project runs its own Vault PKI
+        # CA with a single role and a single allowed SPIFFE ID, any certificate
+        # signed by this CA *is* the authorised MCP workload.
+        # ssl.CERT_REQUIRED ensures only holders of a cert from this CA can
+        # connect.  For production deployments requiring per-connection SPIFFE
+        # ID extraction, use Envoy or Istio for mTLS termination.
         logger.info("MCP HTTPS server listening on %s:%d (mTLS)", host, port)
         uvicorn.run(
             app,
@@ -132,6 +133,8 @@ def run_http_server(server: BaseMCPServer) -> None:
             ssl_certfile=str(CERT_FILE),
             ssl_keyfile=str(KEY_FILE),
             ssl_ca_certs=str(CA_FILE),
+            ssl_cert_reqs=ssl.CERT_REQUIRED,
+            ssl_ciphers="ECDHE+AESGCM:ECDHE+CHACHA20",
         )
     else:
         logger.info(

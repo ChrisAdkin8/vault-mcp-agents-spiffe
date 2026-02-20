@@ -118,7 +118,7 @@ text_centered(tf_x + 130 * S, tf_y + 30 * S, "Bootstrap container", font_small, 
 # ─── Vault box (top right) ───
 v_x, v_y = 680 * S, 100 * S
 draw_rounded_rect((v_x, v_y, v_x + 350 * S, v_y + 60 * S), fill=DARK_YELLOW_BG, outline=YELLOW)
-text_centered(v_x + 175 * S, v_y + 8 * S, "Vault Enterprise", font_heading, YELLOW)
+text_centered(v_x + 175 * S, v_y + 8 * S, "Vault", font_heading, YELLOW)
 text_centered(v_x + 175 * S, v_y + 30 * S, "PKI engine + AppRole auth", font_small, GREY)
 
 # Step 1: vault-init -> Vault (configure PKI + AppRole)
@@ -239,7 +239,7 @@ rot_x, rot_y = 350 * S, 790 * S
 draw_circle_number(rot_x, rot_y + 10 * S, 8)
 draw.text((rot_x + 18 * S, rot_y - 2 * S), "Automatic SVID Rotation", fill=GREEN, font=font_heading)
 draw.text((rot_x + 18 * S, rot_y + 16 * S), "Vault Agent re-renders templates before cert expiry", fill=GREY, font=font_small)
-draw.text((rot_x + 18 * S, rot_y + 30 * S), "MCP servers pick up new certs — no restart required", fill=GREY, font=font_small)
+draw.text((rot_x + 18 * S, rot_y + 30 * S), "MCP servers require restart to load renewed certs (uvicorn limitation)", fill=GREY, font=font_small)
 draw.text((rot_x + 18 * S, rot_y + 44 * S), "On Kubernetes: Vault Agent Injector automates the same flow", fill=GREY, font=font_small)
 
 # Save

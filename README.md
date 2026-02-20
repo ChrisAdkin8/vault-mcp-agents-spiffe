@@ -34,6 +34,12 @@ The 5-minute ceiling is enforced at two independent layers, so both must agree b
 | **Vault GCP impersonated account** | `ttl = "300"` on each impersonated account in `vault_init.sh` | Server-side ceiling — Vault passes this as the `lifetime` to GCP's `generateAccessToken` API, so the token genuinely expires after 5 minutes |
 | **Application policy** | `max_gcp_token_ttl: "5m"` in `policies/capabilities.yaml` | Client-side guard — the application policy declares the intended maximum TTL for audit and defence-in-depth |
 
+The diagram below shows the end-to-end authentication flow — from human login through policy resolution to GCP token issuance with the 5-minute TTL enforced at both layers:
+
+<p align="center">
+  <img src="docs/vault-auth-flow-gcp-credentials.png" alt="Vault authentication flow for GCP credentials: login, policy resolution, and 5-minute token issuance" width="780">
+</p>
+
 ## Why SPIFFE Verifiable Identity Documents for MCP Server Identity?
 
 Short-lived GCP credentials solve the *credential theft* problem, but they do not solve the *workload impersonation* problem. Even with 5-minute tokens, a compromised container on the same Docker bridge network can intercept the human's Vault token from plaintext HTTP traffic and replay it to Vault as if it were the legitimate MCP server. Vault has no way to distinguish the attacker from the real workload because neither presents a cryptographic identity.
@@ -54,7 +60,13 @@ The diagram below contrasts the two scenarios. Without SPIFFE, an attacker can i
   <img src="docs/why-spiffe-timeline.png" alt="Without SPIFFE vs with SPIFFE: impersonation timeline comparison" width="780">
 </p>
 
-The SVID lifecycle is fully automated by the Vault Agent sidecar — no manual certificate management is required. See the [SPIFFE Guide](docs/SPIFFE_GUIDE.md) for implementation details.
+The SVID lifecycle is fully automated by the Vault Agent sidecar — no manual certificate management is required. The diagram below shows the complete lifecycle: PKI bootstrap, AppRole authentication, SVID rendering, mTLS enforcement, and rogue container rejection:
+
+<p align="center">
+  <img src="docs/spiffe-svid-lifecycle.png" alt="SPIFFE SVID lifecycle: PKI bootstrap, AppRole auth, cert rendering, mTLS, and rogue container rejection" width="780">
+</p>
+
+See the [SPIFFE Guide](docs/SPIFFE_GUIDE.md) for implementation details.
 
 
 ## What this project demonstrates
@@ -69,7 +81,7 @@ The SVID lifecycle is fully automated by the Vault Agent sidecar — no manual c
 | Agent ↔ MCP communication | Stdio transport (local) or Streamable HTTP (containers) ([HTTP guide](docs/HTTP_TRANSPORT.md)) |
 | Agent framework | LangChain `create_tool_calling_agent` with tools adapted from MCP |
 | Audit trail | Structured JSON audit events for every tool access and credential operation ([Audit guide](docs/AUDIT_LOGGING.md)) |
-| Containerised deployment | Docker Compose stack with Vault Enterprise, MCP servers, and agent CLI ([Docker guide](docs/DOCKER_COMPOSE_GUIDE.md)) |
+| Containerised deployment | Docker Compose stack with Vault, MCP servers, and agent CLI ([Docker guide](docs/DOCKER_COMPOSE_GUIDE.md)) |
 
 ## Architecture overview
 
@@ -81,43 +93,25 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for diagrams and pattern descriptions.
 
 ## Quick start
 
-The entire stack — Vault Enterprise, MCP servers, and the agent CLI — runs via Docker Compose. No local Python install, virtual environment, or manual Vault configuration is required.
+The entire stack — Vault, MCP servers, and the agent CLI — runs via Docker Compose. No local Python install, virtual environment, or manual Vault configuration is required.
 
 ### Prerequisites
 
 - **Docker** and **Docker Compose** (v2)
-- A **Vault Enterprise license** (obtain one from [hashicorp.com/products/vault/pricing](https://www.hashicorp.com/products/vault/pricing))
 - A GCP project with APIs enabled (Storage, BigQuery, Compute)
 - An LLM API key (Anthropic or OpenAI)
 
-### 1. Provide your Vault Enterprise license
-
-The `docker-compose.yaml` stack uses Vault Enterprise, which requires a license. You can provide the license in one of two ways:
-
-**Option A — Environment file (recommended):**
+### 1. Create the environment file
 
 ```bash
 cp docker/.env.example docker/.env
 ```
 
-Edit `docker/.env` and paste your license key:
+Edit `docker/.env` and add your LLM API key:
 
 ```
-VAULT_LICENSE=02MV4UU43BK5H...  # your full license string
 ANTHROPIC_API_KEY=sk-ant-...     # or set OPENAI_API_KEY instead
 ```
-
-**Option B — Shell environment variable:**
-
-```bash
-export VAULT_LICENSE="02MV4UU43BK5H..."
-export ANTHROPIC_API_KEY="sk-ant-..."
-```
-
-> **Where do I get a Vault Enterprise license?** You can request a trial license
-> from [hashicorp.com/products/vault/trial](https://www.hashicorp.com/products/vault/trial)
-> or use a license provided by your organisation. The license is a long base64-encoded
-> string that starts with `02MV4UU43BK5H`.
 
 ### 2. Configure GCP settings
 
@@ -135,32 +129,9 @@ gcp:
 > tokens do not carry project metadata, so the GCP client libraries cannot
 > infer the project automatically.
 
-### 3. Configure GCP secrets engine
+### 3. Configure GCP secrets engine (optional)
 
-The GCP secrets engine requires pre-provisioned GCP service accounts. Use Terraform to create them, then provide the service account key to Docker Compose.
-
-**Step 1 — Provision GCP resources (one-time):**
-
-```bash
-cd terraform
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars — set gcp_project_id to your GCP project
-terraform init
-terraform apply
-```
-
-This creates:
-- A GCP service account for Vault itself (`vault-gcp-secrets@<project>.iam.gserviceaccount.com`)
-- Dedicated GCP service accounts for each agent (`data-agent-gcp`, `compute-agent-gcp`) with their respective IAM roles
-- IAM bindings allowing Vault to impersonate the agent service accounts
-
-**Step 2 — Extract the SA key and configure Docker Compose:**
-
-```bash
-terraform output -raw vault_sa_key_base64 | base64 -d > sa-key.json
-```
-
-Add the following to `docker/.env`:
+The GCP secrets engine requires pre-provisioned GCP service accounts. Add the following to `docker/.env`:
 
 ```
 GCP_SA_KEY_FILE=./sa-key.json
@@ -172,7 +143,7 @@ The `vault-init` container will automatically configure the Vault GCP secrets en
 
 If GCP variables are not set, the stack starts without the GCP secrets engine — PKI, AppRole, and SPIFFE functionality still work.
 
-To tear down GCP resources: `terraform destroy`. See [`terraform/README.md`](terraform/README.md) for full details.
+See [`terraform/README.md`](terraform/README.md) for details on provisioning GCP resources with Terraform.
 
 ### 4. Start the stack
 
@@ -181,11 +152,11 @@ docker compose --env-file docker/.env up -d --build
 ```
 
 This brings up:
-- **Vault Enterprise** — listening on `http://localhost:8200`
+- **Vault** (OSS) — listening on `http://localhost:8200`
 - **vault-init** — a one-shot container that configures Vault (PKI, AppRole, GCP secrets engine, policies, test users) and writes AppRole credentials to a shared volume
 - **vault-agent** — a sidecar that authenticates via AppRole and renders X.509 SVIDs to a certificate volume
-- **data-mcp-server** — GCS + BigQuery MCP server on port 8001 (with mTLS)
-- **compute-mcp-server** — GCE Compute MCP server on port 8002 (with mTLS)
+- **data-mcp-server** — GCS + BigQuery MCP server (internal port 8001, mTLS enforced, not exposed to host)
+- **compute-mcp-server** — GCE Compute MCP server (internal port 8002, mTLS enforced, not exposed to host)
 - **agent-cli** — the interactive agent container
 
 ### 5. Run the agent
@@ -220,9 +191,9 @@ docker compose --env-file docker/.env exec agent-cli pytest -v
 
 Tests for the policy engine, session, and identity context run without GCP.
 
-### Local development (Vault OSS only)
+### Local development (stdio transport)
 
-For local development with stdio transport (no containers for MCP servers or agents), a lightweight Vault OSS compose file is provided:
+For local development with stdio transport (no containers for MCP servers or agents), a lightweight dev compose file is provided:
 
 ```bash
 docker compose -f docker-compose.dev.yaml up -d
@@ -364,8 +335,8 @@ vault-mcp-agents/
 │   ├── agent.Dockerfile              # Multi-stage build for the agent CLI container
 │   ├── mcp-server.Dockerfile         # Multi-stage build for MCP server containers
 │   └── .env.example                  # Template for Docker Compose environment variables
-├── docker-compose.yaml               # Full stack: Vault Enterprise + MCP servers + agent CLI
-├── docker-compose.dev.yaml           # Local dev: Vault OSS only
+├── docker-compose.yaml               # Full stack: Vault + MCP servers + agent CLI
+├── docker-compose.dev.yaml           # Local dev: Vault only (stdio transport)
 ├── docs/
 │   ├── API_REFERENCE.md              # Module-level API reference
 │   ├── AUDIT_LOGGING.md              # Audit logging system guide

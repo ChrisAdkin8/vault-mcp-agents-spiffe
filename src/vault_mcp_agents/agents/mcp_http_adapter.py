@@ -12,12 +12,14 @@ import json
 import logging
 from typing import Any
 
+import httpx
 from langchain_core.tools import StructuredTool
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 from vault_mcp_agents.agents.mcp_langchain_adapter import _json_schema_to_pydantic
 from vault_mcp_agents.mcp.http_identity_middleware import encode_identity_header
+from vault_mcp_agents.mcp.http_transport import CA_FILE, CERT_FILE, KEY_FILE, _tls_available
 from vault_mcp_agents.mcp.identity_context import IdentityContext
 
 logger = logging.getLogger(__name__)
@@ -43,8 +45,21 @@ async def create_mcp_http_langchain_tools(
 
     exit_stack = contextlib.AsyncExitStack()
     try:
+        if _tls_available():
+            http_client = await exit_stack.enter_async_context(
+                httpx.AsyncClient(
+                    cert=(str(CERT_FILE), str(KEY_FILE)),
+                    verify=str(CA_FILE),
+                    headers=headers,
+                )
+            )
+        else:
+            http_client = await exit_stack.enter_async_context(
+                httpx.AsyncClient(headers=headers)
+            )
+
         read_stream, write_stream, _ = await exit_stack.enter_async_context(
-            streamablehttp_client(url=server_url, headers=headers)
+            streamable_http_client(url=server_url, http_client=http_client)
         )
         session = await exit_stack.enter_async_context(
             ClientSession(read_stream, write_stream)

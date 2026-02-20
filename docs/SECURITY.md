@@ -59,7 +59,7 @@ Containerised (HTTP + mTLS via Vault Agent):
 └──────┼──────────────────┼────────────────┼───────────────────┘
        │                  │                │
        │     ┌────────────▼────────────────▼───────────────┐
-       └────▶│      Vault Enterprise (network)             │
+       └────▶│      Vault (network)             │
              │  - authenticates human (userpass)            │
              │  - issues X.509 SVIDs via PKI               │
              │  - issues GCP tokens                         │
@@ -163,21 +163,28 @@ Even if one layer is misconfigured, the other still caps credential lifetime.
 
 | Concern | Mitigation |
 |---------|------------|
-| MCP ports exposed externally | MCP server ports should **not** be exposed outside the Docker network |
-| Vault token in transit | Use TLS between all services in production |
-| Header spoofing | Use network policies to restrict which services can reach MCP servers |
-| Workload impersonation | Vault Agent renders X.509 SVIDs with SPIFFE URI SANs for mTLS between services |
+| MCP ports exposed externally | MCP server ports are **not** exposed outside the Docker network (no `ports:` mapping in `docker-compose.yaml`) |
+| Vault token in transit | mTLS encrypts all agent-to-MCP traffic; Vault tokens are never transmitted in plaintext |
+| Header spoofing | mTLS with `ssl.CERT_REQUIRED` ensures only certificate holders can connect |
+| Workload impersonation | Vault Agent renders X.509 SVIDs with SPIFFE URI SANs; clients must present a valid certificate signed by the project CA |
+
+**mTLS enforcement details:**
+
+The MCP servers start uvicorn with `ssl_cert_reqs=ssl.CERT_REQUIRED`, meaning every connecting client must present a certificate signed by the project's internal CA. Since the Vault PKI engine has a single role (`mcp-server`) with a single allowed SPIFFE ID (`spiffe://my-trust-domain/ns/default/sa/mcp`), any certificate from this CA is guaranteed to belong to an authorised workload.
+
+**SPIFFE URI SAN validation limitation:** Uvicorn and Python's ASGI layer do not expose the peer certificate to application code, so per-connection SPIFFE ID extraction is not possible at this layer. The project-internal CA already constrains identity sufficiently for this deployment model. For production deployments requiring per-connection SPIFFE ID validation, use Envoy or Istio for mTLS termination with SPIFFE-aware SAN enforcement.
 
 ### Production recommendations
 
 For production deployments beyond the proof-of-concept:
 
-1. **mTLS is enabled by default** — Vault Agent renders X.509 SVIDs that MCP servers use for mutual TLS.
-2. **Use network policies** to restrict MCP server access to authorised agent containers only.
-3. **Use a remote Terraform backend** with encryption for state files containing GCP service account keys (if using Terraform for GCP provisioning).
-4. **Rotate Vault root token** — the dev-mode root token is for development only.
-5. **Configure Vault audit logging** in addition to application-level audit logging.
-6. **Rotate SVIDs** — configure Vault Agent template `max_stale` and PKI role TTLs for regular certificate rotation.
+1. **mTLS is enforced** — Vault Agent renders X.509 SVIDs; MCP servers require client certificates (`CERT_REQUIRED`); clients present certificates via httpx.
+2. **Use Envoy/Istio** for SPIFFE-aware mTLS termination with per-connection SPIFFE URI SAN validation.
+3. **Use network policies** to restrict MCP server access to authorised agent containers only.
+4. **Use a remote Terraform backend** with encryption for state files containing GCP service account keys (if using Terraform for GCP provisioning).
+5. **Rotate Vault root token** — the dev-mode root token is for development only.
+6. **Configure Vault audit logging** in addition to application-level audit logging.
+7. **Rotate SVIDs** — configure Vault Agent template `max_stale` and PKI role TTLs for regular certificate rotation.
 
 ## Session expiry
 

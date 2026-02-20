@@ -234,4 +234,3 @@ These environment variables affect runtime behaviour:
 | `MCP_TRANSPORT` | MCP servers | Transport mode: `http` or `stdio` (defaults to `stdio`). |
 | `MCP_HOST` | MCP servers (HTTP) | Bind address for HTTP mode (defaults to `0.0.0.0`). |
 | `MCP_PORT` | MCP servers (HTTP) | Port for HTTP mode (defaults to `8000`). |
-| `VAULT_LICENSE` | Docker Compose | Vault Enterprise license key (containerised deployment). |

@@ -1,9 +1,8 @@
-# Full stack: Vault Enterprise + vault-init bootstrap + Vault Agent + MCP Servers + Agent CLI.
+# Full stack: Vault + vault-init bootstrap + Vault Agent + MCP Servers + Agent CLI.
 #
 # Prerequisites:
 #   1. Copy docker/.env.example to docker/.env and fill in values.
-#   2. Ensure VAULT_LICENSE is set (either in docker/.env or as an env var).
-#   3. (Optional) Set GCP_SA_KEY_FILE, DATA_AGENT_SA_EMAIL, and
+#   2. (Optional) Set GCP_SA_KEY_FILE, DATA_AGENT_SA_EMAIL, and
 #      COMPUTE_AGENT_SA_EMAIL in docker/.env to enable the GCP secrets engine.
 #
 # Usage:
@@ -15,9 +14,9 @@
 #   docker compose -f docker-compose.dev.yaml up -d
 
 services:
-  # ---------- 1. Vault Enterprise ----------
+  # ---------- 1. Vault ----------
   vault:
-    image: hashicorp/vault-enterprise:1.21-ent
+    image: hashicorp/vault:1.21
     container_name: vault-server
     ports:
       - "8200:8200"
@@ -25,7 +24,6 @@ services:
       VAULT_DEV_ROOT_TOKEN_ID: "dev-root-token"
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
       VAULT_ADDR: "http://127.0.0.1:8200"
-      VAULT_LICENSE: "${VAULT_LICENSE}"
     cap_add:
       - IPC_LOCK
     volumes:
@@ -42,7 +40,7 @@ services:
   # Waits for Vault, configures PKI, AppRole, policies, GCP secrets engine,
   # userpass auth + test users, and writes AppRole credentials to a shared volume.
   vault-init:
-    image: hashicorp/vault-enterprise:1.21-ent
+    image: hashicorp/vault:1.21
     container_name: vault-init
     depends_on:
       vault:
@@ -54,7 +52,6 @@ services:
     environment:
       VAULT_ADDR: "http://vault:8200"
       VAULT_TOKEN: "dev-root-token"
-      VAULT_LICENSE: "${VAULT_LICENSE}"
       DATA_AGENT_SA_EMAIL: "${DATA_AGENT_SA_EMAIL:-}"
       COMPUTE_AGENT_SA_EMAIL: "${COMPUTE_AGENT_SA_EMAIL:-}"
     entrypoint: ["sh", "/scripts/vault_init.sh"]
@@ -65,7 +62,7 @@ services:
   # Reads AppRole credentials from the shared volume, authenticates
   # to Vault, and renders X.509 SVIDs to the certificate volume.
   vault-agent:
-    image: hashicorp/vault-enterprise:1.21-ent
+    image: hashicorp/vault:1.21
     container_name: vault-agent
     restart: always
     depends_on:
@@ -76,7 +73,6 @@ services:
       - shared-creds:/vault/creds:ro
       - certs-vol:/etc/mcp/certs
     environment:
-      VAULT_LICENSE: "${VAULT_LICENSE}"
     command: ["vault", "agent", "-config=/etc/vault/agent.hcl"]
     networks:
       - mcp-net
@@ -93,15 +89,13 @@ services:
       MCP_PORT: "8001"
       MCP_HOST: "0.0.0.0"
       VAULT_ADDR: "http://vault:8200"
-    ports:
-      - "8001:8001"
     depends_on:
       vault-agent:
         condition: service_started
     volumes:
       - certs-vol:/etc/mcp/certs:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD", "curl", "--cacert", "/etc/mcp/certs/ca.crt", "--cert", "/etc/mcp/certs/server.crt", "--key", "/etc/mcp/certs/server.key", "-f", "https://localhost:8001/health"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -120,15 +114,13 @@ services:
       MCP_PORT: "8002"
       MCP_HOST: "0.0.0.0"
       VAULT_ADDR: "http://vault:8200"
-    ports:
-      - "8002:8002"
     depends_on:
       vault-agent:
         condition: service_started
     volumes:
       - certs-vol:/etc/mcp/certs:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      test: ["CMD", "curl", "--cacert", "/etc/mcp/certs/ca.crt", "--cert", "/etc/mcp/certs/server.crt", "--key", "/etc/mcp/certs/server.key", "-f", "https://localhost:8002/health"]
       interval: 10s
       timeout: 3s
       retries: 5

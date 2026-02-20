@@ -316,12 +316,12 @@ export VAULT_TOKEN=dev-root-token
 bash scripts/setup_vault.sh
 ```
 
-To test with the full containerised stack (Vault Enterprise + MCP servers + agent CLI):
+To test with the full containerised stack (Vault + MCP servers + agent CLI):
 
 ```bash
 # Create environment file
 cp docker/.env.example docker/.env
-# Edit docker/.env — add VAULT_LICENSE and ANTHROPIC_API_KEY
+# Edit docker/.env — add ANTHROPIC_API_KEY
 
 # Start everything
 docker compose --env-file docker/.env up -d --build

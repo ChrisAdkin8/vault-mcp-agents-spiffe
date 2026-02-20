@@ -58,7 +58,7 @@ vault write pki/roles/mcp-server \
     key_bits=2048 \
     allowed_domains="mcp-server,localhost,svc.cluster.local" \
     allow_subdomains=true \
-    allowed_uri_sans="spiffe://my-trust-domain/ns/*/sa/*" \
+    allowed_uri_sans="spiffe://my-trust-domain/ns/default/sa/mcp" \
     enforce_hostnames=false \
     allow_any_name=false
 

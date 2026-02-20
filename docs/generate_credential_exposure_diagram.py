@@ -133,7 +133,7 @@ draw.text((820 * S, 420 * S), "same token", font=font_small, fill=CYAN)
 # ─── Vault box ───
 draw_rounded_rect((vault_x, vault_y, vault_x + 350 * S, vault_y + 70 * S), fill=(30, 140, 110), outline=GREEN)
 text_centered(vault_x + 175 * S, vault_y + 12 * S, "Vault", font_heading, WHITE)
-text_centered(vault_x + 175 * S, vault_y + 38 * S, "(Enterprise)", font_body, (220, 220, 220))
+text_centered(vault_x + 175 * S, vault_y + 38 * S, "(OSS)", font_body, (220, 220, 220))
 
 # ─── "Vault sees identical tokens" callout ───
 callout_x = 800 * S

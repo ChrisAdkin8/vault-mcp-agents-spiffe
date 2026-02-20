@@ -86,7 +86,7 @@ The Vault Agent sidecar is the preferred approach for SVID provisioning because 
 
 ### Vault is always a pull model
 
-Vault — including Vault Enterprise — never pushes secrets to consumers. Something must always ask Vault for a secret. The three options for who does the asking are:
+Vault never pushes secrets to consumers. Something must always ask Vault for a secret. The three options for who does the asking are:
 
 | Approach | How it works | Trade-offs |
 |----------|-------------|------------|
@@ -146,7 +146,7 @@ The `vault-init` container creates an internal root CA (`MCP Root CA`) with a 10
 The `mcp-server` PKI role allows:
 
 - Common names: `mcp-server`, `localhost`, `svc.cluster.local` (and subdomains)
-- SPIFFE URI SANs matching: `spiffe://my-trust-domain/ns/*/sa/*`
+- SPIFFE URI SANs matching: `spiffe://my-trust-domain/ns/default/sa/mcp` (exact match — only the MCP workload identity is permitted)
 - IP SANs (for direct IP access)
 - RSA 2048-bit keys with 1-hour default TTL (24-hour max)
 
@@ -178,14 +178,19 @@ auto_auth {
 }
 
 template {
-  destination = "/etc/mcp/certs/server.crt"
+  destination = "/tmp/vault-agent-cert-render-status"
   contents = <<EOH
-{{- with secret "pki/issue/mcp-server" "common_name=mcp-server" "uri_sans=spiffe://my-trust-domain/ns/default/sa/mcp" -}}
-{{ .Data.certificate }}
-{{- end }}
+{{ with pkiCert "pki/issue/mcp-server" "common_name=mcp-server" "uri_sans=spiffe://my-trust-domain/ns/default/sa/mcp" }}
+{{ .Cert | writeToFile "/etc/mcp/certs/server.crt" "" "" "0644" }}
+{{ .Key | writeToFile "/etc/mcp/certs/server.key" "" "" "0600" }}
+{{ .CA | writeToFile "/etc/mcp/certs/ca.crt" "" "" "0644" }}
+{{ .Cert }}
+{{ end }}
 EOH
 }
 ```
+
+The `pkiCert` function issues a single certificate from Vault's PKI engine. The `.Cert`, `.Key`, and `.CA` fields are all from the same issuance, preventing the cert/key mismatch that would occur if three separate `secret` calls each generated an independent key pair. The `writeToFile` function writes each component to its own file with correct permissions (key at 0600, cert and CA at 0644).
 
 The agent renders three files:
 

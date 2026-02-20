@@ -159,7 +159,7 @@ Containerised (mTLS via Vault Agent):
 └──────┼──────────────────┼────────────────┼───────────────────┘
        │                  │                │
        │     ┌────────────▼────────────────▼───────────────┐
-       └────▶│      Vault Enterprise (network)             │
+       └────▶│      Vault (network)             │
              │  - authenticates human (userpass)            │
              │  - issues X.509 SVIDs via PKI               │
              │  - issues GCP tokens                         │
